@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "astronomy": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "-m",
+        "uv",
+        "run",
+        "--quiet",
+        "astronomy-mcp"
+      ],
+      "env": {}
+    }
+  }
+}

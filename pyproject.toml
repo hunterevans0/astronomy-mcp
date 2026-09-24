@@ -1,0 +1,32 @@
+[project]
+name = "astronomy-mcp"
+version = "0.1.0"
+description = "MCP server exposing SIMBAD and AAVSO VSX astronomy data"
+readme = "README.md"
+authors = [
+    { name = "Hunter Evans", email = "moab@flibit.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp[cli]>=2.2.0",
+]
+
+[project.scripts]
+astronomy-mcp = "astronomy_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["live: hits the real SIMBAD / AAVSO VSX services (deselected by default)"]
+addopts = "-m 'not live'"
