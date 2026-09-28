@@ -12,8 +12,9 @@ from typing import Any
 
 import httpx
 
+from astronomy_mcp.http import USER_AGENT
+
 API_URL = "https://vsx.aavso.org/index.php"
-USER_AGENT = "astronomy-mcp/0.1"
 
 _FLOAT_FIELDS = {
     "RA2000": "ra_deg",

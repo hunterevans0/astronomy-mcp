@@ -17,6 +17,22 @@ CALLS = [
     ("vsx_lookup", {"name": "R Leo"}),
     ("vsx_cone_search", {"ra_deg": 146.89, "dec_deg": 11.43, "radius_deg": 0.5, "max_mag": 12}),
     ("variable_stars_near", {"target": "M13", "radius_deg": 0.1, "limit": 3}),
+    ("geocode_location", {"query": "Moab, Utah", "count": 1}),
+    ("describe_object", {"name": "Ring Nebula"}),
+    ("search_deep_sky", {"object_type": "globular_cluster", "max_magnitude": 6, "limit": 3}),
+    ("identify_constellation", {"target": "Vega"}),
+    ("get_position", {"target": "Jupiter", "place": "Moab, Utah"}),
+    ("get_rise_set_transit", {"target": "M42", "place": "Moab, Utah"}),
+    ("get_twilight_times", {"place": "Moab, Utah"}),
+    ("get_moon_phases", {"days": 30}),
+    ("get_planet_positions", {"place": "Moab, Utah"}),
+    ("whats_up_tonight", {"place": "Moab, Utah", "bortle": 2, "max_results": 5}),
+    ("is_visible_tonight", {"target": "Andromeda Galaxy", "place": "Moab, Utah"}),
+    ("get_sky_forecast", {"place": "Moab, Utah"}),
+    ("get_limiting_magnitude", {"equipment": "telescope", "aperture_mm": 200, "bortle": 4, "place": "Moab, Utah"}),
+    ("get_eclipses", {"place": "Moab, Utah", "lunar_count": 2}),
+    ("get_space_weather", {"place": "Fairbanks, Alaska"}),
+    ("get_upcoming_launches", {"limit": 2}),
 ]
 
 

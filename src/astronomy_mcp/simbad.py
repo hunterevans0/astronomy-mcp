@@ -12,8 +12,9 @@ from typing import Any
 
 import httpx
 
+from astronomy_mcp.http import USER_AGENT
+
 TAP_URL = "https://simbad.cds.unistra.fr/simbad/sim-tap/sync"
-USER_AGENT = "astronomy-mcp/0.1"
 
 # Photometric bands available in SIMBAD's `allfluxes` table.
 BANDS = ("U", "B", "V", "R", "I", "J", "H", "K", "G")
