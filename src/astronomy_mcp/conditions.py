@@ -11,6 +11,7 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from astronomy_mcp import visibility
 from astronomy_mcp.http import UpstreamError, get_json
 from astronomy_mcp.location import Location
 from astronomy_mcp.sky import Night, fmt
@@ -43,35 +44,42 @@ def bortle_from_sqm(sqm: float) -> int:
 
 def nelm_from_sqm(sqm: float) -> float:
     """Naked-eye limiting magnitude from sky brightness (Schaefer-style fit)."""
-    return 7.93 - 5 * math.log10(10 ** (4.316 - sqm / 5) + 1)
+    return visibility.eye_threshold(sqm)
 
 
-def sqm_with_moon(sqm: float, moon_magnitude: float, moon_altitude_deg: float) -> float:
+def _moon_scattering(separation_deg: float) -> float:
+    """Krisciunas & Schaefer (1991) scattering function f(rho), Rayleigh + Mie terms."""
+    rho = max(separation_deg, 5.0)
+    return 10**5.36 * (1.06 + math.cos(math.radians(rho)) ** 2) + 10 ** (6.15 - rho / 40)
+
+
+def sqm_with_moon(
+    sqm: float, moon_magnitude: float, moon_altitude_deg: float, separation_deg: float = 90.0
+) -> float:
     """Add scattered moonlight to a dark-sky brightness.
 
-    Anchored so a high full Moon (mag -12.7) contributes roughly 18 mag/arcsec^2,
-    scaled by the Moon's actual brightness and damped as it nears the horizon.
+    Anchored so a high full Moon (mag -12.7) adds about 18 mag/arcsec^2 at 90°
+    from the Moon, scaled by the Moon's actual brightness, damped near the horizon,
+    and brightened close to the Moon with the Krisciunas & Schaefer angular profile.
     """
     if moon_altitude_deg <= 0:
         return sqm
     k = 10 ** (-0.4 * (moon_magnitude + 12.7)) * math.sqrt(math.sin(math.radians(moon_altitude_deg)))
+    k *= _moon_scattering(separation_deg) / _moon_scattering(90.0)
     return -2.5 * math.log10(10 ** (-0.4 * sqm) + k * 10 ** (-0.4 * 18.0))
 
 
 def limiting_magnitude(sqm: float, equipment: str, aperture_mm: float | None = None) -> dict[str, Any]:
-    nelm = nelm_from_sqm(sqm)
     aperture = aperture_mm or DEFAULT_APERTURE_MM[equipment]
-    gain = 5 * math.log10(aperture / 7.0) if equipment != "naked_eye" else 0.0
+    best = visibility.detect(0.0, sqm, equipment, aperture)
     out = {
         "sky_brightness_mag_arcsec2": round(sqm, 2),
         "bortle_equivalent": bortle_from_sqm(sqm),
-        "naked_eye_limit": round(nelm, 1),
+        "naked_eye_limit": round(nelm_from_sqm(sqm), 1),
         "equipment": equipment,
         "aperture_mm": aperture if equipment != "naked_eye" else None,
-        "stellar_limit": round(nelm + gain, 1),
-        # Extended objects spread their light out; a galaxy needs to be ~1.5-2 mag brighter
-        # than the stellar limit to be seen comfortably.
-        "extended_object_limit": round(nelm + gain - 2.0, 1),
+        "stellar_limit": round(best.margin_mag, 1),
+        "stellar_limit_magnification": best.magnification if equipment == "telescope" else None,
     }
     return {k: v for k, v in out.items() if v is not None}
 

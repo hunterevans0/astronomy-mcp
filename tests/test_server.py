@@ -16,6 +16,7 @@ EXPECTED_TOOLS = {
     "get_eclipses",
     # planning and conditions
     "whats_up_tonight", "is_visible_tonight", "get_sky_forecast", "get_limiting_magnitude",
+    "get_light_pollution", "find_dark_sites", "get_horizon_profile",
     # space
     "get_space_weather", "get_upcoming_launches",
 }
@@ -58,7 +59,7 @@ async def test_twilight_and_position_use_saved_default(moab):
 
 async def test_whats_up_planets_offline(moab):
     async with Client(mcp) as client:
-        result = await client.call_tool("whats_up_tonight", {"date": "2026-10-10", "include": "planets"})
+        result = await client.call_tool("whats_up_tonight", {"date": "2026-10-10", "include": "planets", "terrain": False})
     data = result.structured_content
     names = [t["name"] for t in data["targets"]]
     assert "Saturn" in names
@@ -67,8 +68,24 @@ async def test_whats_up_planets_offline(moab):
 
 async def test_is_visible_for_planet_offline(moab):
     async with Client(mcp) as client:
-        data = (await client.call_tool("is_visible_tonight", {"target": "Saturn", "date": "2026-10-10"})).structured_content
+        data = (await client.call_tool("is_visible_tonight", {"target": "Saturn", "date": "2026-10-10", "terrain": False})).structured_content
     assert data["visible"] is True and data["resolved_by"] == "astronomy-engine"
+    assert data["difficulty"] == "easy"
+
+
+async def test_instructions_guide_without_overreaching():
+    text = " ".join(mcp.instructions.split())
+    assert "prefer calling a tool over answering from memory" in text
+    assert "do not need these tools" in text  # leaves general questions to the model
+    for name in ("whats_up_tonight", "is_visible_tonight", "get_sky_forecast", "find_dark_sites"):
+        assert name in text
+
+
+async def test_tool_descriptions_say_when_to_use_them():
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+    assert "Use for" in tools["is_visible_tonight"].description
+    assert "clouds" in tools["whats_up_tonight"].description  # points to the forecast tool for weather
 
 
 @pytest.mark.live
@@ -90,7 +107,7 @@ async def test_live_vsx_lookup():
 @pytest.mark.live
 async def test_live_whats_up_includes_deep_sky(moab):
     async with Client(mcp) as client:
-        data = (await client.call_tool("whats_up_tonight", {"date": "2026-10-10", "max_results": 30})).structured_content
+        data = (await client.call_tool("whats_up_tonight", {"date": "2026-10-10", "max_results": 30, "terrain": False})).structured_content
     assert "M 31" in [t["name"] for t in data["targets"]]
 
 

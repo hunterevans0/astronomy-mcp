@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 
-USER_AGENT = "astronomy-mcp/0.2"
+USER_AGENT = "astronomy-mcp/0.3"
 
 _cache: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[float, Any]] = {}
 

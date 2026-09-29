@@ -153,14 +153,20 @@ def test_nelm_and_moonlight():
     bright = conditions.sqm_with_moon(21.5, -12.7, 60)
     assert 17.5 < bright < 18.5
     assert conditions.sqm_with_moon(21.5, -9.0, 60) > bright  # a crescent brightens the sky less
+    # Krisciunas & Schaefer: the sky is much brighter close to the Moon
+    near = conditions.sqm_with_moon(21.5, -12.7, 60, separation_deg=10)
+    assert near < conditions.sqm_with_moon(21.5, -12.7, 60, separation_deg=40) < bright + 0.3
+    assert bright - near > 1.0
 
 
 def test_limiting_magnitude_scales_with_aperture():
     eye = conditions.limiting_magnitude(21.0, "naked_eye")
     scope = conditions.limiting_magnitude(21.0, "telescope", 200)
-    assert "aperture_mm" not in eye
-    assert scope["stellar_limit"] == pytest.approx(eye["stellar_limit"] + 7.28, abs=0.1)
-    assert scope["extended_object_limit"] == pytest.approx(scope["stellar_limit"] - 2, abs=0.05)
+    assert "aperture_mm" not in eye and "stellar_limit_magnification" not in eye
+    assert eye["stellar_limit"] == eye["naked_eye_limit"] + 0.5  # experienced-observer allowance
+    # Aperture gain (5 log D/7 = 7.3 mag) plus the darker background at high power
+    assert 7.3 < scope["stellar_limit"] - eye["stellar_limit"] < 9.0
+    assert scope["stellar_limit_magnification"] >= 100
 
 
 def test_bortle_round_trip():

@@ -1,22 +1,23 @@
 # Roadmap
 
-What's built (M1) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
+What's built (M1, most of M2) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
 
 ## M1: tonight's sky (done)
 
 `set_default_location`, `geocode_location`, `describe_object`, `search_deep_sky`, `identify_constellation`, `get_position`, `get_rise_set_transit`, `get_twilight_times`, `get_moon_phases`, `get_planet_positions`, `whats_up_tonight`, `is_visible_tonight`, `get_sky_forecast`, `get_limiting_magnitude`, `get_eclipses`, `get_space_weather`, `get_upcoming_launches`.
 
-Known gaps in M1:
+Gaps found in M1, now closed:
 
-- **Light pollution is user-supplied.** Bortle is entered, not looked up. Sampling the VIIRS or Falchi 2016 rasters would make `get_light_pollution` automatic.
-- **Visibility heuristics are uncalibrated.** Surface-brightness and moon-separation rules are rough and should be tuned against real observing logs.
-- **Terrain is ignored.** There's no horizon profile, so targets behind a ridge still get recommended (see `get_horizon_profile` in M2).
+- ✅ **Light pollution was user-supplied.** Sky brightness now comes from the 2025 Light Pollution Atlas (VIIRS-based) via `get_light_pollution`. A Bortle class or SQM reading from the user still takes priority.
+- ✅ **Visibility heuristics were uncalibrated.** They're replaced by a detection-threshold model (`visibility.py`) and a Krisciunas & Schaefer moonlight profile, tuned against a 53-case benchmark from Bortle's published descriptions and standard observing experience. It passes all 53 cases.
+  - Still open: calibrating against real observing logs. That needs `log_observation` (M7) so outcomes can be compared with predictions.
+- ✅ **Terrain was ignored.** `whats_up_tonight` and `is_visible_tonight` now apply a cached terrain horizon profile.
 
 ## M2: conditions and site
 
-- `get_light_pollution`: Bortle, SQM and naked-eye limit at a coordinate (VIIRS / Falchi raster, bulk).
-- `find_dark_sites`: darkest reachable spots within a drive radius (raster + OSM Overpass).
-- `get_horizon_profile`: terrain horizon from a DEM (OpenTopoData / Copernicus DEM).
+- ✅ `get_light_pollution`: atlas zone, SQM, estimated Bortle and naked-eye limit at a coordinate (Light Pollution Atlas 2025 tiles).
+- ✅ `find_dark_sites`: darkest, then nearest, spots within a radius, each with OpenStreetMap access points. Distances are straight-line; driving time would need a routing service.
+- ✅ `get_horizon_profile`: terrain horizon from Copernicus DEM (Open-Meteo), with OpenTopoData as fallback.
 - `get_transparency_drivers`: smoke, dust and aerosols (Open-Meteo Air Quality).
 - `best_night_this_month`: score upcoming nights on moon, target altitude and forecast.
 - `find_dark_moon_weekends`: new-moon weekends for trip planning (offline).
