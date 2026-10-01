@@ -3,7 +3,8 @@
 import pytest
 from mcp import Client
 
-from astronomy_mcp import mcp
+from astronomy_mcp import conditions, mcp
+from astronomy_mcp.http import UpstreamError
 
 EXPECTED_TOOLS = {
     # catalogs
@@ -17,6 +18,7 @@ EXPECTED_TOOLS = {
     # planning and conditions
     "whats_up_tonight", "is_visible_tonight", "get_sky_forecast", "get_limiting_magnitude",
     "get_light_pollution", "find_dark_sites", "get_horizon_profile",
+    "get_transparency_drivers", "best_night_this_month", "find_dark_moon_weekends",
     # space
     "get_space_weather", "get_upcoming_launches",
 }
@@ -71,6 +73,32 @@ async def test_is_visible_for_planet_offline(moab):
         data = (await client.call_tool("is_visible_tonight", {"target": "Saturn", "date": "2026-10-10", "terrain": False})).structured_content
     assert data["visible"] is True and data["resolved_by"] == "astronomy-engine"
     assert data["difficulty"] == "easy"
+
+
+async def test_dark_moon_weekends_offline(moab):
+    async with Client(mcp) as client:
+        here = (await client.call_tool("find_dark_moon_weekends", {"start_date": "2026-10-01", "months": 1})).structured_content
+    assert here["location"] == "Moab"
+    assert here["weekends"][0]["friday"] == "2026-10-09" and here["weekends"][0]["moon_free_dark_pct"] == 100
+
+
+async def test_dark_moon_weekends_work_without_a_location():
+    async with Client(mcp) as client:
+        result = await client.call_tool("find_dark_moon_weekends", {"start_date": "2026-10-01", "months": 1})
+    assert not result.is_error
+    assert result.structured_content["weekends"][0]["friday"] == "2026-10-09"
+
+
+async def test_best_night_survives_a_forecast_outage(moab, monkeypatch):
+    async def down(loc):
+        raise UpstreamError("Could not reach Open-Meteo")
+
+    monkeypatch.setattr(conditions, "cloud_cover_by_hour", down)
+    async with Client(mcp) as client:
+        data = (await client.call_tool("best_night_this_month", {"target": "Saturn", "start_date": "2026-10-08", "days": 5})).structured_content
+    assert data["target"] == "Saturn" and "Cloud forecast unavailable" in data["warning"]
+    assert data["best_nights_with_forecast"] == [] and len(data["best_nights_beyond_forecast"]) == 5
+    assert len(data["nights"]) == 5 and "moonlight" not in data["scoring"]
 
 
 async def test_instructions_guide_without_overreaching():

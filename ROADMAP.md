@@ -1,6 +1,6 @@
 # Roadmap
 
-What's built (M1, most of M2) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
+What's built (M1, M2) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
 
 ## M1: tonight's sky (done)
 
@@ -13,14 +13,14 @@ Gaps found in M1, now closed:
   - Still open: calibrating against real observing logs. That needs `log_observation` (M7) so outcomes can be compared with predictions.
 - ✅ **Terrain was ignored.** `whats_up_tonight` and `is_visible_tonight` now apply a cached terrain horizon profile.
 
-## M2: conditions and site
+## M2: conditions and site (done)
 
 - ✅ `get_light_pollution`: atlas zone, SQM, estimated Bortle and naked-eye limit at a coordinate (Light Pollution Atlas 2025 tiles).
 - ✅ `find_dark_sites`: darkest, then nearest, spots within a radius, each with OpenStreetMap access points. Distances are straight-line; driving time would need a routing service.
 - ✅ `get_horizon_profile`: terrain horizon from Copernicus DEM (Open-Meteo), with OpenTopoData as fallback.
-- `get_transparency_drivers`: smoke, dust and aerosols (Open-Meteo Air Quality).
-- `best_night_this_month`: score upcoming nights on moon, target altitude and forecast.
-- `find_dark_moon_weekends`: new-moon weekends for trip planning (offline).
+- ✅ `get_transparency_drivers`: smoke, dust and aerosols over a night, with a rating and the extra extinction (Open-Meteo Air Quality, about 5 days ahead). The named driver is a heuristic: the model can't separate smoke from urban haze.
+- ✅ `best_night_this_month`: scores upcoming nights on usable time, target altitude, moonlight near the target and cloud forecast. Nights past the 16-day cloud forecast are ranked separately. Terrain is not applied.
+- ✅ `find_dark_moon_weekends`: Friday and Saturday nights with the Moon down for most of the dark hours (offline).
 
 ## M3: solar system depth
 

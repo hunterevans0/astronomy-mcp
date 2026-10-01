@@ -1,9 +1,10 @@
-"""Observing-night planning: resolve targets, judge visibility, rank what's up tonight."""
+"""Observing-night planning: resolve targets, judge visibility, rank what's up tonight,
+and compare nights (best night for a target, dark-moon weekends)."""
 
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 import astronomy as ae
@@ -17,6 +18,12 @@ from astronomy_mcp.sky import Night, Target, fmt
 
 MOON = Target("Moon", ae.Body.Moon)
 SKIP_GROUPS = {"star", "other", "dark_nebula"}  # rarely what "worth looking at" means
+
+NIGHT_STEP_MIN = 20  # sampling when comparing many nights
+MOON_WASHOUT_MAG = 3.0  # sky brightening at which moonlight zeroes a night's score
+FULL_CREDIT_HOURS = 2.0  # usable time beyond this no longer improves a night's score
+NEW_MOON_REACH_DAYS = 9  # weekends further than this from new moon are never dark
+MAX_ILLUMINATION_PCT = 25.0  # dark-moon limit when there is no location to compute moonrise from
 
 
 async def resolve_target(name: str) -> Target:
@@ -332,3 +339,199 @@ def whats_up(
         "too_faint_for_conditions": hidden_faint or None,
         "hidden_by_terrain": hidden_terrain or None,
     }
+
+
+# ---------------------------------------------------------------- comparing nights
+
+def moon_free_hours(loc: Location, n: Night, step_min: int = 10) -> float:
+    """Hours of the night's dark window with the Moon below the horizon."""
+    if n.darkest == "none":
+        return 0.0
+    track = sky.altitude_track(MOON, n.window[0], n.window[1], loc, step_min)
+    hours = (n.window[1] - n.window[0]).total_seconds() / 3600
+    return round(hours * sum(1 for row in track if row[1] < 0) / len(track), 1)
+
+
+def _forecast_hour(t: datetime) -> datetime:
+    return (t.astimezone(UTC) + timedelta(minutes=30)).replace(minute=0, second=0, microsecond=0)
+
+
+def score_night(
+    target: Target | None,
+    loc: Location,
+    n: Night,
+    sqm: float,
+    min_altitude: float,
+    clouds: dict[datetime, float] | None,
+) -> dict[str, Any]:
+    """Score one night 0-100 as usable time x target altitude x moonlight x clear sky.
+
+    Cloud cover is left out (and `cloud_pct` omitted) when the forecast doesn't reach the night.
+    """
+    row: dict[str, Any] = {"date": n.date.isoformat(), "weekday": n.date.strftime("%a")}
+    if n.darkest == "none":
+        return {**row, "score": 0, "reason": "no darkness (midnight sun)"}
+    is_body = target is not None and target.body is not None
+    start, end = _planet_window(n) if is_body else n.window
+    times = _samples(start, end, NIGHT_STEP_MIN)
+    mid = times[len(times) // 2]
+    phase = sky.moon_phase(mid)
+    row["moon_illuminated_percent"] = phase["illuminated_percent"]
+
+    if target is None:
+        usable = list(range(len(times)))
+    else:
+        if is_body:
+            alts = [sky.horizontal(target, t, loc)["altitude_deg"] for t in times]
+        else:
+            alts = [alt for alt, _ in sky.fast_tracks([(target.ra_deg, target.dec_deg)], times, loc)[0]]
+        usable = [i for i, alt in enumerate(alts) if alt >= min_altitude]
+        if not usable:
+            return {**row, "score": 0,
+                    "reason": f"never above {min_altitude:.0f}° while it is dark (peak {max(alts):.0f}°)"}
+        best_i = max(usable, key=lambda i: alts[i])
+    hours = (end - start).total_seconds() / 3600 * len(usable) / len(times)
+    score = min(1.0, hours / FULL_CREDIT_HOURS)
+    if target is None:
+        row["dark_hours"] = round(hours, 1)
+    else:
+        score *= math.sin(math.radians(alts[best_i]))
+        row |= {"hours_above_min_altitude": round(hours, 1), "peak_altitude_deg": round(alts[best_i]),
+                "best_time": fmt(times[best_i], loc)}
+
+    if not is_body:  # moonlight doesn't hurt the Moon and planets
+        sep = 90.0
+        if target is not None:
+            sep = sky.separation_deg(target.ra_deg, target.dec_deg, *sky.j2000_position(MOON, mid))
+            row["moon_separation_deg"] = round(sep)
+        brightening = sum(
+            sqm - sqm_with_moon(sqm, phase["magnitude"], sky.horizontal(MOON, times[i], loc)["altitude_deg"], sep)
+            for i in usable
+        ) / len(usable)
+        row["moon_sky_brightening_mag"] = round(brightening, 2)
+        score *= 1 - min(1.0, brightening / MOON_WASHOUT_MAG)
+
+    if clouds:
+        seen = [clouds.get(_forecast_hour(times[i])) for i in usable]
+        if None not in seen:
+            cloud = sum(seen) / len(seen)
+            row["cloud_pct"] = round(cloud)
+            score *= 1 - cloud / 100
+    return {**row, "score": round(100 * score)}
+
+
+def best_nights(
+    target: Target | None,
+    loc: Location,
+    first: date,
+    days: int,
+    sqm: float,
+    min_altitude: float,
+    clouds: dict[datetime, float] | None,
+    top: int = 5,
+) -> dict[str, Any]:
+    """Score every night in a span; rank those the cloud forecast reaches apart from those it doesn't."""
+    rows = [score_night(target, loc, sky.night(loc, first + timedelta(days=i)), sqm, min_altitude, clouds)
+            for i in range(days)]
+
+    def ranked(want_forecast: bool) -> list[dict[str, Any]]:
+        pool = [r for r in rows if r["score"] > 0 and ("cloud_pct" in r) == want_forecast]
+        return sorted(pool, key=lambda r: r["score"], reverse=True)[:top]
+
+    forecast_dates = [r["date"] for r in rows if "cloud_pct" in r]
+    factors = ["usable time"]
+    if target is not None:
+        factors.append("target altitude")
+    if target is None or target.is_fixed:
+        factors.append("moonlight")
+    out = {
+        "period": {"from": rows[0]["date"], "to": rows[-1]["date"]},
+        "cloud_forecast_through": forecast_dates[-1] if forecast_dates else None,
+        "best_nights_with_forecast": ranked(True),
+        "best_nights_beyond_forecast": ranked(False),
+        "nights": rows,
+        "scoring": f"score = {' x '.join(factors)} x clear sky, 0-100. Nights beyond the cloud forecast are "
+                   "scored without weather, so compare them only with each other. Cloud forecasts more than "
+                   "about 5 days out are low confidence.",
+    }
+    if not any(r["score"] for r in rows):
+        reason = rows[0].get("reason", "the forecast is fully overcast or the Moon washes out every night")
+        out["message"] = f"No night in this period scores above zero: {reason}."
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def dark_moon_weekends(
+    loc: Location | None, first: date, days: int, min_moon_free_pct: float = 70.0
+) -> dict[str, Any]:
+    """Friday and Saturday nights that are mostly free of moonlight.
+
+    With a location, a weekend qualifies when the Moon is below the horizon for at least
+    `min_moon_free_pct` of the two nights' dark hours. Without one, moonrise is unknown, so
+    both nights must have the Moon under MAX_ILLUMINATION_PCT lit.
+    """
+    tz = loc.tz if loc else UTC
+    shown = loc or Location(0.0, 0.0)
+    last = first + timedelta(days=days - 1)
+    span_start = datetime.combine(first, time(12), tzinfo=tz)
+    reach = timedelta(days=30)
+    new_moons = [t for name, t in sky.moon_quarters(span_start - reach, span_start + timedelta(days=days) + reach)
+                 if name == "New Moon"]
+    until_friday = (4 - first.weekday()) % 7
+    friday = first + timedelta(days=-1 if until_friday == 6 else until_friday)  # on a Saturday, keep this weekend
+
+    weekends, no_darkness = [], 0
+    while friday <= last:
+        days_of = (friday, friday + timedelta(days=1))
+        friday += timedelta(weeks=1)
+        midnights = [datetime.combine(d + timedelta(days=1), time(0), tzinfo=tz) for d in days_of]
+        new_moon = min(new_moons, key=lambda t: abs(t - midnights[1]))
+        from_new = (midnights[1] - new_moon).total_seconds() / 86400
+        if abs(from_new) > NEW_MOON_REACH_DAYS:
+            continue
+        nights, dark, moon_free = [], 0.0, 0.0
+        for day, midnight in zip(days_of, midnights):
+            phase = sky.moon_phase(midnight)
+            row = {"date": day.isoformat(), "phase": phase["phase"], "illuminated_percent": phase["illuminated_percent"]}
+            if loc:
+                n = sky.night(loc, day)
+                hours = (n.window[1] - n.window[0]).total_seconds() / 3600 if n.darkest != "none" else 0.0
+                free = moon_free_hours(loc, n)
+                row |= {"dark_hours": round(hours, 1), "moon_free_dark_hours": free}
+                dark, moon_free = dark + hours, moon_free + free
+            nights.append(row)
+        brightest = max(r["illuminated_percent"] for r in nights)
+        if loc:
+            if not dark:
+                no_darkness += 1
+                continue
+            pct = min(100.0, 100 * moon_free / dark)
+            qualifies, excellent = pct >= min_moon_free_pct, pct >= 90
+        else:
+            pct = None
+            qualifies, excellent = brightest <= MAX_ILLUMINATION_PCT, brightest <= 10
+        if not qualifies:
+            continue
+        weekend = {
+            "friday": days_of[0].isoformat(),
+            "saturday": days_of[1].isoformat(),
+            "rating": "excellent" if excellent else "good",
+            "moon_free_dark_pct": round(pct) if pct is not None else None,
+            "new_moon": fmt(new_moon, shown),
+            "days_from_new_moon": round(from_new, 1),
+            "nights": nights,
+        }
+        weekends.append({k: v for k, v in weekend.items() if v is not None})
+
+    out = {
+        "period": {"from": first.isoformat(), "to": last.isoformat()},
+        "criterion": (
+            f"Moon below the horizon for at least {min_moon_free_pct:.0f}% of the Friday and Saturday nights' "
+            "dark hours" if loc else
+            f"Moon no more than {MAX_ILLUMINATION_PCT:.0f}% lit on both nights (no location given, so moonrise "
+            "and moonset are not considered; dates are UTC)"
+        ),
+        "count": len(weekends),
+        "weekends": weekends,
+        "weekends_without_darkness": no_darkness or None,
+    }
+    return {k: v for k, v in out.items() if v is not None}

@@ -14,7 +14,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from astronomy_mcp import (
-    catalog, conditions, darksites, horizon, lightpollution, location, planner, simbad, sky, space, vsx,
+    airquality, catalog, conditions, darksites, horizon, lightpollution, location, planner, simbad, sky, space, vsx,
 )
 from astronomy_mcp.http import UpstreamError
 from astronomy_mcp.location import Location
@@ -38,7 +38,9 @@ mcp = MCPServer(
         "Questions about general astronomy knowledge, history, physics, or how to use equipment do "
         "not need these tools; answer those directly.\n\n"
         "Routing: 'what should I look at tonight' -> whats_up_tonight; 'can I see X' -> "
-        "is_visible_tonight; 'will it be clear' -> get_sky_forecast; 'how dark is it here' -> "
+        "is_visible_tonight; 'will it be clear' -> get_sky_forecast; 'is it smoky or hazy' -> "
+        "get_transparency_drivers; 'which night is best' -> best_night_this_month; 'when is the next "
+        "new-moon weekend' -> find_dark_moon_weekends; 'how dark is it here' -> "
         "get_light_pollution; 'where can I go for darker skies' -> find_dark_sites; 'tell me about X' "
         "-> describe_object; planet positions -> get_planet_positions; Moon phases -> get_moon_phases; "
         "aurora -> get_space_weather; launches -> get_upcoming_launches.\n\n"
@@ -477,12 +479,11 @@ async def get_twilight_times(
     out: dict[str, Any] = {"location": loc.name, **n.to_dict(loc)}
     if n.darkest != "none":
         moon_rst = sky.rise_set_transit(planner.MOON, loc, day)
-        track = sky.altitude_track(planner.MOON, n.window[0], n.window[1], loc, step_min=10)
         out["moon"] = {
             **sky.moon_phase(n.window[0] + (n.window[1] - n.window[0]) / 2),
             "rise": moon_rst.get("rise"),
             "set": moon_rst.get("set"),
-            "moon_free_dark_hours": round(sum(1 for row in track if row[1] < 0) * 10 / 60, 1),
+            "moon_free_dark_hours": planner.moon_free_hours(loc, n),
         }
     return out
 
@@ -621,6 +622,64 @@ async def is_visible_tonight(
     return out
 
 
+@tool(annotations=READ_ONLY)
+async def best_night_this_month(
+    target: Annotated[str | None, Field(description="Object to plan for: planet, 'Moon', catalog or common name. Omit to rate nights for general dark-sky observing.")] = None,
+    start_date: Annotated[str | None, Field(description="First night to consider (YYYY-MM-DD); omit for tonight")] = None,
+    days: Annotated[int, Field(ge=2, le=60, description="How many nights to compare")] = 30,
+    min_altitude: MIN_ALT = 25.0,
+    bortle: BORTLE = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Compare upcoming nights and pick the best ones, for one target or for dark-sky observing.
+
+    Use for 'which night this week is best for the Orion Nebula', 'when should I go out this
+    month' or 'best night for Saturn'. Scores each night on how long the target is well placed
+    in darkness, how high it gets, how much moonlight brightens the sky near it, and the cloud
+    forecast. Clouds are only forecast about 16 days ahead, so later nights are ranked separately
+    on Moon and altitude alone. For one night's detail, follow up with is_visible_tonight and
+    get_sky_forecast.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    t = await planner.resolve_target(target) if target else None
+    if t is not None and t.name == "Sun":
+        raise ValueError("The Sun is not a night-time target.")
+    sqm, sqm_source = await _sky_brightness(loc, bortle)
+    warning = None
+    try:
+        clouds = await conditions.cloud_cover_by_hour(loc)
+    except UpstreamError as exc:
+        clouds, warning = None, f"Cloud forecast unavailable ({exc}); nights are ranked on Moon and altitude only."
+    result = planner.best_nights(t, loc, sky.observing_date(start_date, loc), days, sqm, min_altitude, clouds)
+    out = {"target": t.name if t else "general dark-sky observing", "location": loc.name, **result,
+           "sky_brightness_source": sqm_source, "warning": warning}
+    return {k: v for k, v in out.items() if v is not None}
+
+
+@tool(annotations=READ_ONLY)
+async def find_dark_moon_weekends(
+    start_date: Annotated[str | None, Field(description="First day to consider (YYYY-MM-DD); omit for today")] = None,
+    months: Annotated[int, Field(ge=1, le=24, description="How many months ahead to search")] = 6,
+    min_moon_free_pct: Annotated[float, Field(ge=30, le=100, description="Minimum share of the two nights' dark hours with the Moon below the horizon")] = 70.0,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Upcoming weekends (Friday and Saturday nights) with little or no moonlight.
+
+    Use for 'when is the next new-moon weekend', 'which weekends this summer are good for a
+    dark-sky trip' or booking a campsite months ahead. With a location, counts the dark hours
+    each night with the Moon down; without one, falls back to the Moon's illumination. Computed
+    offline; weather is not considered.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    first = sky.observing_date(start_date, loc) if loc or start_date else datetime.now(UTC).date()
+    result = planner.dark_moon_weekends(loc, first, round(months * 30.44), min_moon_free_pct)
+    return {"location": loc.name if loc else None, **result}
+
+
 # ================================================================ conditions
 
 @tool(annotations=READ_ONLY)
@@ -644,6 +703,26 @@ async def get_sky_forecast(
     moon = sky.moon_phase(n.window[0] + (n.window[1] - n.window[0]) / 2)
     return {"date": day.isoformat(), "location": loc.name, "night": n.to_dict(loc),
             "moon": {"phase": moon["phase"], "illuminated_percent": moon["illuminated_percent"]}, **fc}
+
+
+@tool(annotations=READ_ONLY)
+async def get_transparency_drivers(
+    date: DATE = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """What is dimming a night's sky besides clouds: wildfire smoke, dust and other aerosols.
+
+    Use for 'is it smoky tonight', 'why is the sky so hazy' or 'will the Milky Way look washed
+    out'. Hour-by-hour aerosol optical depth, dust and fine particles from sunset to sunrise,
+    with a transparency rating, the likely cause and the extra extinction in magnitudes. About
+    5 days ahead. Clouds, humidity and seeing are in get_sky_forecast.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    day = sky.observing_date(date, loc)
+    n = sky.night(loc, day)
+    return {"date": day.isoformat(), "location": loc.name, **await airquality.transparency_night(loc, n)}
 
 
 @tool(annotations=READ_ONLY)

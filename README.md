@@ -10,7 +10,7 @@ No API keys are required. Every source is free and public:
 | [AAVSO VSX](https://vsx.aavso.org/) | Variable stars: type, period, magnitude range |
 | [OpenNGC](https://github.com/mattiaverga/OpenNGC) (CC-BY-SA 4.0) | NGC/IC/Messier/Caldwell deep-sky catalog, downloaded once and cached |
 | [Astronomy Engine](https://github.com/cosinekitty/astronomy) | Offline ephemerides: planets, Moon, rise/set, twilight, phases, eclipses, constellations |
-| [Open-Meteo](https://open-meteo.com/) | Geocoding, timezones, hourly cloud cover by layer, humidity, dew point, wind, terrain elevation (Copernicus DEM) |
+| [Open-Meteo](https://open-meteo.com/) | Geocoding, timezones, hourly cloud cover by layer, humidity, dew point, wind, terrain elevation (Copernicus DEM), aerosols and dust (CAMS) |
 | [Light Pollution Atlas 2025](https://djlorenz.github.io/astronomy/lp/) (D. Lorenz, VIIRS data) | Artificial sky brightness anywhere, read from the atlas's map tiles and cached |
 | [OpenStreetMap](https://www.openstreetmap.org/) via Overpass (ODbL) | Campgrounds, viewpoints and trailheads near candidate dark sites |
 | [OpenTopoData](https://www.opentopodata.org/) | Fallback terrain elevation (SRTM 90 m) when Open-Meteo is rate-limited |
@@ -38,7 +38,15 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | `is_visible_tonight` | Yes/no for one object, with reasons (too low, behind terrain, too faint), best time, direction, suggested magnification |
 | `get_sky_forecast` | Hour-by-hour cloud layers, dew risk, wind, seeing and transparency, plus a 0-100 score |
 | `get_twilight_times` | Sunset, civil/nautical/astronomical twilight, dark window, moon-free dark hours |
+| `get_transparency_drivers` | Smoke, dust and aerosols through the night: transparency rating, likely cause, extra extinction |
 | `get_limiting_magnitude` | Faintest stars reachable, from sky darkness, aperture and moonlight |
+
+**Planning ahead**
+
+| Tool | What it does |
+| --- | --- |
+| `best_night_this_month` | Scores upcoming nights for a target (or for dark-sky observing) on altitude, moonlight and cloud forecast |
+| `find_dark_moon_weekends` | Weekends with the Moon down for most of the dark hours, up to two years out |
 
 **Sites**
 
@@ -84,6 +92,8 @@ Targets can be planets, `Moon`, catalog names (`M31`, `NGC 7000`, `Caldwell 14`)
 - **Detectability** uses a threshold model at the eyepiece. The telescope darkens the sky and magnifies the object; the eye's threshold depends on the background brightness and the object's apparent size; the model tries several magnifications and keeps the best one. Galaxies and globular clusters are treated as their brighter cores.
 - **Calibration:** the model's two free constants are tuned against 53 benchmark cases in [tests/test_visibility.py](tests/test_visibility.py). The cases come from Bortle's published class descriptions, the hardest Messier objects in a 100 mm scope, city-sky observing, and 10x50 binocular targets. It passes all 53. Borderline cases (M33 at Bortle 4, M31 at Bortle 7) land near zero margin by design.
 - **Terrain:** targets behind hills are excluded using a cached horizon profile. Trees and buildings aren't in the elevation model.
+
+- **Comparing nights:** `best_night_this_month` multiplies four factors, each 0 to 1: time the target spends above the minimum altitude in darkness (full credit at 2 hours), the sine of its peak altitude, moonlight (how much the Moon brightens the sky at the target's distance from it; 3 mag or more scores zero), and the clear fraction of the cloud forecast. Planets and the Moon skip the moonlight factor. Nights past the forecast are ranked in their own list.
 
 These are estimates. Observer experience, transparency and eyesight shift real results by half a magnitude or more.
 
@@ -145,9 +155,10 @@ Layout of `src/astronomy_mcp/`:
 
 - `server.py`: MCP tool definitions. Its `@tool()` decorator turns expected failures (bad input, a service being down) into messages the model can read. Anything else is reported as a generic crash.
 - `sky.py`: offline positional astronomy on Astronomy Engine (twilight, rise/set, fast bulk altitudes, eclipses).
-- `planner.py`: target resolution (planet, then OpenNGC, then SIMBAD), visibility verdicts, and the `whats_up_tonight` ranking.
+- `planner.py`: target resolution (planet, then OpenNGC, then SIMBAD), visibility verdicts, the `whats_up_tonight` ranking, night-by-night scoring and dark-moon weekends.
 - `visibility.py`: the detection-threshold model (calibrated in `tests/test_visibility.py`).
 - `conditions.py`: sky-brightness and moonlight model, limiting magnitude, weather forecast.
+- `airquality.py`: aerosol optical depth, dust and fine particles, and what they do to transparency.
 - `lightpollution.py`, `darksites.py`, `horizon.py`: atlas lookup, dark-site search, terrain horizon.
 - `catalog.py`, `simbad.py`, `vsx.py`, `location.py`, `space.py`: one module per data source.
 - `http.py`: shared HTTP client with an in-memory TTL cache.

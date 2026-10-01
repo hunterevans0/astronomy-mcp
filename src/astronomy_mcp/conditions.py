@@ -124,6 +124,23 @@ def _longest_run(flags: list[bool]) -> tuple[int, int]:
     return best
 
 
+async def cloud_cover_by_hour(loc: Location) -> dict[datetime, float]:
+    """Total cloud cover (%) for every hour Open-Meteo forecasts, about 16 days ahead."""
+    payload = await get_json(
+        OPEN_METEO_URL,
+        {"latitude": round(loc.latitude, 3), "longitude": round(loc.longitude, 3), "hourly": "cloud_cover",
+         "timezone": "UTC", "forecast_days": 16},
+        source="Open-Meteo",
+        ttl=1800,
+    )
+    hourly = payload["hourly"]
+    return {
+        datetime.fromisoformat(stamp).replace(tzinfo=UTC): cloud
+        for stamp, cloud in zip(hourly["time"], hourly["cloud_cover"])
+        if cloud is not None
+    }
+
+
 async def forecast_night(loc: Location, n: Night, units: str = "metric") -> dict[str, Any]:
     start = (n.sunset or n.window[0]).astimezone(UTC).replace(minute=0, second=0, microsecond=0)
     end = (n.sunrise or n.window[1]).astimezone(UTC)
