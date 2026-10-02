@@ -118,6 +118,46 @@ def separation_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
     return math.degrees(2 * math.asin(min(1.0, math.sqrt(h))))
 
 
+Vec = tuple[float, float, float]
+
+
+def vec(v: Any) -> Vec:
+    """astronomy-engine vector or state vector as a plain tuple (AU, J2000 equatorial)."""
+    return v.x, v.y, v.z
+
+
+def dot(a: Vec, b: Vec) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def cross(a: Vec, b: Vec) -> Vec:
+    return a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]
+
+
+def unit(a: Vec) -> Vec:
+    n = math.sqrt(dot(a, a))
+    return a[0] / n, a[1] / n, a[2] / n
+
+
+def wrap180(angle_deg: float) -> float:
+    return (angle_deg + 180) % 360 - 180
+
+
+def body_lon_lat(north: Vec, spin_deg: float, direction: Vec) -> tuple[float, float]:
+    """East longitude and latitude on a rotating body of the point facing `direction`.
+
+    `north` is the body's pole and `spin_deg` the IAU prime-meridian angle W, measured along
+    the body's equator from its ascending node on the J2000 equator.
+    """
+    node = unit(cross((0.0, 0.0, 1.0), north))
+    quarter = cross(north, node)
+    w = math.radians(spin_deg % 360)
+    prime = tuple(node[i] * math.cos(w) + quarter[i] * math.sin(w) for i in range(3))
+    d = unit(direction)
+    lon = math.degrees(math.atan2(dot(d, cross(north, prime)), dot(d, prime)))
+    return lon, math.degrees(math.asin(max(-1.0, min(1.0, dot(d, north)))))
+
+
 def airmass(altitude_deg: float) -> float | None:
     """Kasten & Young (1989) airmass; None below the horizon."""
     if altitude_deg <= 0:

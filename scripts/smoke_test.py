@@ -37,6 +37,12 @@ CALLS = [
     ("get_horizon_profile", {"place": "Moab, Utah"}),
     ("find_dark_sites", {"place": "Moab, Utah", "radius_km": 60, "max_results": 2}),
     ("get_eclipses", {"place": "Moab, Utah", "lunar_count": 2}),
+    ("find_conjunctions", {"place": "Moab, Utah", "days": 120}),
+    ("find_oppositions", {"years": 1}),
+    ("get_jupiter_moons", {"place": "Moab, Utah"}),
+    ("get_jupiter_events", {"place": "Moab, Utah", "hours": 24}),
+    ("get_lunar_terminator", {"place": "Moab, Utah", "limit": 5}),
+    ("get_moon_libration", {"place": "Moab, Utah"}),
     ("get_space_weather", {"place": "Fairbanks, Alaska"}),
     ("get_upcoming_launches", {"limit": 2}),
 ]

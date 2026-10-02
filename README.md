@@ -9,7 +9,8 @@ No API keys are required. Every source is free and public:
 | [SIMBAD](https://simbad.cds.unistra.fr/) (CDS) | Identifiers, coordinates, types and magnitudes for millions of objects |
 | [AAVSO VSX](https://vsx.aavso.org/) | Variable stars: type, period, magnitude range |
 | [OpenNGC](https://github.com/mattiaverga/OpenNGC) (CC-BY-SA 4.0) | NGC/IC/Messier/Caldwell deep-sky catalog, downloaded once and cached |
-| [Astronomy Engine](https://github.com/cosinekitty/astronomy) | Offline ephemerides: planets, Moon, rise/set, twilight, phases, eclipses, constellations |
+| [Astronomy Engine](https://github.com/cosinekitty/astronomy) | Offline ephemerides: planets, Moon, rise/set, twilight, phases, eclipses, constellations, Jupiter's moons, lunar libration |
+| [Gazetteer of Planetary Nomenclature](https://planetarynames.wr.usgs.gov/) (IAU/USGS) | Named lunar features with positions and sizes, downloaded once and cached |
 | [Open-Meteo](https://open-meteo.com/) | Geocoding, timezones, hourly cloud cover by layer, humidity, dew point, wind, terrain elevation (Copernicus DEM), aerosols and dust (CAMS) |
 | [Light Pollution Atlas 2025](https://djlorenz.github.io/astronomy/lp/) (D. Lorenz, VIIRS data) | Artificial sky brightness anywhere, read from the atlas's map tiles and cached |
 | [OpenStreetMap](https://www.openstreetmap.org/) via Overpass (ODbL) | Campgrounds, viewpoints and trailheads near candidate dark sites |
@@ -66,6 +67,17 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | `get_moon_phases` | Current phase and exact times of upcoming quarters and new moons |
 | `get_eclipses` | Upcoming lunar eclipses, and solar eclipses visible from your location |
 | `identify_constellation` | Which constellation an object or RA/Dec lies in |
+| `find_conjunctions` | Close pairings of planets (and optionally the Moon) over a date range, with separation and morning/evening sky |
+| `find_oppositions` | Oppositions of Mars through Neptune: date, brightness, apparent size, closest approach to Earth |
+
+**Jupiter and the Moon up close**
+
+| Tool | What it does |
+| --- | --- |
+| `get_jupiter_moons` | Where the four Galilean moons are, which are hidden or in transit, central meridian and Great Red Spot position |
+| `get_jupiter_events` | Upcoming moon transits, shadow transits, occultations, eclipses and Red Spot transits, flagged for your sky |
+| `get_lunar_terminator` | Named craters, mountains and rilles in low sunlight on the terminator, with the Sun's height at each |
+| `get_moon_libration` | Libration angles, the favoured limb, and which limb features (Mare Orientale, Bailly, polar craters) are well placed |
 
 **Catalogs**
 
@@ -133,7 +145,7 @@ uv sync                 # create .venv and install dependencies
 4. Quit Claude Desktop completely (right-click the tray icon → Quit; closing the window isn't enough) and start it again. Desktop only reads the config and starts servers at launch, so do this after every code change too.
 5. Check **Settings → Developer**: `astronomy` should show as running. If it failed, the log is `mcp-server-astronomy.log` in the `logs` folder next to the config file.
 
-The first deep-sky question downloads the OpenNGC catalog (about 4 MB). Light-pollution tiles and horizon profiles download as needed. Everything is cached in `~/.astronomy-mcp`.
+The first deep-sky question downloads the OpenNGC catalog (about 4 MB), and the first lunar-terminator question downloads the USGS lunar gazetteer (about 24 MB, kept as a 200 KB extract). Light-pollution tiles and horizon profiles download as needed. Everything is cached in `~/.astronomy-mcp`.
 
 **Other MCP hosts:** use the same command and arguments as for Claude Desktop.
 
@@ -159,6 +171,9 @@ Layout of `src/astronomy_mcp/`:
 - `visibility.py`: the detection-threshold model (calibrated in `tests/test_visibility.py`).
 - `conditions.py`: sky-brightness and moonlight model, limiting magnitude, weather forecast.
 - `airquality.py`: aerosol optical depth, dust and fine particles, and what they do to transparency.
+- `jupiter.py`: Galilean moon geometry seen from Earth and from the Sun, event search, central meridian and Great Red Spot. `GRS_LONGITUDE` there needs a yearly update.
+- `lunar.py`: the Moon's orientation (libration, subsolar point), the terminator, and the USGS feature gazetteer.
+- `almanac.py`: conjunctions and oppositions.
 - `lightpollution.py`, `darksites.py`, `horizon.py`: atlas lookup, dark-site search, terrain horizon.
 - `catalog.py`, `simbad.py`, `vsx.py`, `location.py`, `space.py`: one module per data source.
 - `http.py`: shared HTTP client with an in-memory TTL cache.

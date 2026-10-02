@@ -14,7 +14,8 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from astronomy_mcp import (
-    airquality, catalog, conditions, darksites, horizon, lightpollution, location, planner, simbad, sky, space, vsx,
+    airquality, almanac, catalog, conditions, darksites, horizon, jupiter, lightpollution, location, lunar, planner,
+    simbad, sky, space, vsx,
 )
 from astronomy_mcp.http import UpstreamError
 from astronomy_mcp.location import Location
@@ -43,6 +44,9 @@ mcp = MCPServer(
         "new-moon weekend' -> find_dark_moon_weekends; 'how dark is it here' -> "
         "get_light_pollution; 'where can I go for darker skies' -> find_dark_sites; 'tell me about X' "
         "-> describe_object; planet positions -> get_planet_positions; Moon phases -> get_moon_phases; "
+        "Jupiter's moons or Red Spot -> get_jupiter_moons, get_jupiter_events; what to look at on the "
+        "Moon -> get_lunar_terminator, get_moon_libration; planets close together or at their best -> "
+        "find_conjunctions, find_oppositions; "
         "aurora -> get_space_weather; launches -> get_upcoming_launches.\n\n"
         "Location: tools take latitude/longitude or a place name, and otherwise use the saved "
         "default. When the user says where they observe from, call set_default_location once. If no "
@@ -850,6 +854,161 @@ async def get_eclipses(
     else:
         out["note"] = "Give a location (or save a default) to find solar eclipses visible from it."
     return out
+
+
+def _range_start(start_date: str | None, loc: Location | None) -> datetime:
+    """Local midnight starting `start_date`, or now."""
+    if not start_date:
+        return datetime.now(UTC)
+    shown = loc or Location(0.0, 0.0)
+    return datetime.combine(sky.observing_date(start_date, shown), datetime.min.time(), tzinfo=shown.tz)
+
+
+@tool(annotations=READ_ONLY)
+async def find_conjunctions(
+    start_date: Annotated[str | None, Field(description="First day (YYYY-MM-DD); omit for today")] = None,
+    days: Annotated[int, Field(ge=1, le=1830, description="How many days ahead to search")] = 365,
+    max_separation_deg: Annotated[float, Field(gt=0, le=15, description="Only pairings at least this close")] = 5.0,
+    include_moon: Annotated[bool, Field(description="Also list the Moon passing each planet (about one per planet per month; best with a short range)")] = False,
+    body: Annotated[
+        Literal["moon", *sky.PLANETS] | None,  # type: ignore[valid-type]
+        Field(description="Only pairings that involve this body"),
+    ] = None,
+    min_elongation_deg: Annotated[float, Field(ge=0, le=60, description="Skip pairings closer to the Sun than this; 0 keeps everything")] = 12.0,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Upcoming close pairings of planets in the sky (and optionally the Moon with planets).
+
+    Use for 'when are Venus and Jupiter close together', 'any conjunctions this year' or
+    'when is the Moon next to Saturn'. Returns the moment of closest approach, the separation,
+    which body is to the north, the constellation, and whether it is a morning or evening
+    event. Computed offline for the centre of the Earth; a location only adds local times and
+    whether the pair is up at that moment.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return almanac.conjunctions(_range_start(start_date, loc), days, loc, max_separation_deg,
+                                include_moon or body == "moon", body, min_elongation_deg)
+
+
+@tool(annotations=READ_ONLY)
+async def find_oppositions(
+    start_date: Annotated[str | None, Field(description="First day (YYYY-MM-DD); omit for today")] = None,
+    years: Annotated[float, Field(gt=0, le=30, description="How many years ahead to search (Mars comes to opposition only every 26 months)")] = 3,
+    planets: Annotated[
+        list[Literal[almanac.OUTER_PLANETS]] | None,  # type: ignore[valid-type]
+        Field(description="Restrict to these planets; omit for Mars through Neptune"),
+    ] = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Upcoming oppositions of Mars, Jupiter, Saturn, Uranus and Neptune: when each planet is
+    opposite the Sun, up all night, and at its biggest and brightest.
+
+    Use for 'when is the next Mars opposition', 'when is Saturn best this year' or 'how close
+    does Mars get in 2027'. Gives the date, constellation, magnitude, apparent size, distance,
+    the date of closest approach to Earth, and with a location how high the planet climbs.
+    Computed offline; use rather than recalling dates.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return almanac.oppositions(_range_start(start_date, loc), round(years * 365.25), loc, planets)
+
+
+# ================================================================ Jupiter and the Moon up close
+
+GRS = Annotated[float | None, Field(ge=0, lt=360, description="Great Red Spot's System II longitude, if you have a current measurement; omit to use the built-in drift estimate")]
+
+
+@tool(annotations=READ_ONLY)
+async def get_jupiter_moons(
+    time: TIME = None,
+    grs_longitude: GRS = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Where Io, Europa, Ganymede and Callisto are relative to Jupiter at a given moment.
+
+    Use for 'which moon is which', 'why can I only see three moons' or 'is the Red Spot facing
+    us right now'. Gives each moon's side and distance from the planet, whether it is in
+    transit, hidden behind Jupiter or in its shadow, any moon shadow on the disk, the
+    east-to-west line-up, the central meridian longitudes and where the Great Red Spot is.
+    Computed offline. For upcoming transits and eclipses, use get_jupiter_events.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return jupiter.moons_now(sky.parse_time(time, loc or Location(0.0, 0.0)), loc, grs_longitude)
+
+
+@tool(annotations=READ_ONLY)
+async def get_jupiter_events(
+    time: Annotated[str | None, Field(description="Start of the search, ISO 8601; without an offset it is the observer's local time. Omit for now.")] = None,
+    hours: Annotated[float, Field(gt=0, le=240, description="How many hours ahead to search")] = 24,
+    observable_only: Annotated[bool, Field(description="Keep only events with Jupiter at least 10° up in a dark sky at the location")] = False,
+    grs_longitude: GRS = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Upcoming events of Jupiter's moons and Great Red Spot, in time order.
+
+    Use for 'when is the next shadow transit', 'when can I see the Great Red Spot tonight' or
+    'any Io transits this week'. Lists moon transits, shadow transits, occultations and eclipses
+    (start and end) and Red Spot transits, good to a few minutes. With a location, each event
+    says whether Jupiter is up in a dark sky. Computed offline.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    if observable_only and loc is None:
+        raise ValueError("observable_only needs a location.")
+    return jupiter.events(sky.parse_time(time, loc or Location(0.0, 0.0)), hours, loc, grs_longitude, observable_only)
+
+
+@tool(annotations=READ_ONLY)
+async def get_lunar_terminator(
+    time: TIME = None,
+    min_diameter_km: Annotated[float, Field(ge=0, le=1000, description="Smallest feature to list")] = 20.0,
+    max_sun_altitude_deg: Annotated[float, Field(gt=0, le=30, description="How far from the terminator to look, as the Sun's height above the feature")] = 8.0,
+    feature_types: Annotated[
+        list[Literal[lunar.FEATURE_TYPES]] | None,  # type: ignore[valid-type]
+        Field(description="Restrict to these kinds of feature, e.g. ['crater'] or ['mons', 'rupes', 'vallis']"),
+    ] = None,
+    limit: Annotated[int, Field(ge=1, le=100, description="Maximum features")] = 30,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Craters, mountains and other named features on the Moon's terminator at a given time.
+
+    Use for 'what should I look at on the Moon tonight' or 'is Copernicus on the terminator'.
+    These are the features in low, raking sunlight, where shadows show the most relief. Lists
+    them largest first with the Sun's height at each and whether it is lunar sunrise or
+    sunset there, plus the Moon's phase and terminator longitude. Feature names come from
+    the IAU/USGS gazetteer (downloaded once, about 24 MB).
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    when = sky.parse_time(time, loc or Location(0.0, 0.0))
+    return lunar.terminator(await lunar.get_features(), when, loc, min_diameter_km, max_sun_altitude_deg,
+                            set(feature_types) if feature_types else None, limit)
+
+
+@tool(annotations=READ_ONLY)
+async def get_moon_libration(
+    time: TIME = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """How the Moon is tipped toward the observer, and which limb features that brings into view.
+
+    Use for 'is Mare Orientale visible tonight', 'what is the libration' or 'which limb is
+    favoured'. Gives libration in longitude and latitude, the favoured limb, and for 45 limb
+    features (Mare Orientale, Mare Humboldtianum, Bailly, the polar craters and others) how far
+    inside the limb each sits, whether it is sunlit and whether the view is favourable.
+    Computed offline.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return lunar.libration(sky.parse_time(time, loc or Location(0.0, 0.0)), loc)
 
 
 # ================================================================ space weather and spaceflight

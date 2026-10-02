@@ -1,6 +1,6 @@
 # Roadmap
 
-What's built (M1, M2) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
+What's built (M1, M2, half of M3) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
 
 ## M1: tonight's sky (done)
 
@@ -24,10 +24,12 @@ Gaps found in M1, now closed:
 
 ## M3: solar system depth
 
-- `get_jupiter_moons`, `get_jupiter_events`: Galilean moon positions, transits, shadow transits, GRS transit times.
-- `get_lunar_terminator`: craters on the terminator tonight (USGS planetary nomenclature).
-- `get_moon_libration`: which limb features are visible (offline).
-- `find_conjunctions`, `find_oppositions`: planetary events over a date range (offline).
+- ✅ `get_jupiter_moons`, `get_jupiter_events`: Galilean moon positions, transits, shadow transits, occultations, eclipses and GRS transit times (offline). Event times are for the moon's centre, good to a few minutes. The Red Spot's longitude is a constant with a drift rate in `jupiter.py` (91° on 2026-06-01, +1.75°/month, from Sky & Telescope / JUPOS) and needs a yearly update; tools take an override.
+  - Still open: mutual events between the moons, and fetching the Red Spot's longitude from JUPOS.
+- ✅ `get_lunar_terminator`: named features in low sunlight on the terminator (USGS planetary nomenclature, downloaded once). Lettered satellite craters are left out.
+- ✅ `get_moon_libration`: libration angles, favoured limb, and how 45 limb features are placed and lit (offline, topocentric with a location).
+- ✅ `find_conjunctions`, `find_oppositions`: closest approaches between planets (optionally the Moon), and outer-planet oppositions with closest approach to Earth (offline).
+  - Still open: planet-star conjunctions, greatest elongations of Mercury and Venus.
 - `get_comet_visibility`, `get_asteroid_ephemeris`: bright comets and asteroids (JPL Horizons, MPC, COBS).
 - `find_close_approaches`, `get_fireball_reports`: NEO passes and bolides (JPL SBDB CAD, CNEOS).
 

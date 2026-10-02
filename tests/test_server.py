@@ -3,7 +3,7 @@
 import pytest
 from mcp import Client
 
-from astronomy_mcp import conditions, mcp
+from astronomy_mcp import conditions, lunar, mcp
 from astronomy_mcp.http import UpstreamError
 
 EXPECTED_TOOLS = {
@@ -14,7 +14,9 @@ EXPECTED_TOOLS = {
     "geocode_location", "set_default_location", "get_default_location",
     # sky math
     "get_position", "get_rise_set_transit", "get_twilight_times", "get_moon_phases", "get_planet_positions",
-    "get_eclipses",
+    "get_eclipses", "find_conjunctions", "find_oppositions",
+    # solar system detail
+    "get_jupiter_moons", "get_jupiter_events", "get_lunar_terminator", "get_moon_libration",
     # planning and conditions
     "whats_up_tonight", "is_visible_tonight", "get_sky_forecast", "get_limiting_magnitude",
     "get_light_pollution", "find_dark_sites", "get_horizon_profile",
@@ -99,6 +101,34 @@ async def test_best_night_survives_a_forecast_outage(moab, monkeypatch):
     assert data["target"] == "Saturn" and "Cloud forecast unavailable" in data["warning"]
     assert data["best_nights_with_forecast"] == [] and len(data["best_nights_beyond_forecast"]) == 5
     assert len(data["nights"]) == 5 and "moonlight" not in data["scoring"]
+
+
+async def test_solar_system_tools_work_offline_without_a_location():
+    async with Client(mcp) as client:
+        moons = (await client.call_tool("get_jupiter_moons", {"time": "2026-10-03T11:00Z"})).structured_content
+        events = (await client.call_tool("get_jupiter_events", {"time": "2026-10-03T00:00Z", "hours": 12})).structured_content
+        libration = (await client.call_tool("get_moon_libration", {"time": "2026-10-03T00:00Z"})).structured_content
+        pairs = (await client.call_tool("find_conjunctions", {"start_date": "2026-11-01", "days": 30})).structured_content
+        best = (await client.call_tool("find_oppositions", {"start_date": "2026-10-01", "years": 1, "planets": ["saturn"]})).structured_content
+        needs_site = await client.call_tool("get_jupiter_events", {"observable_only": True})
+    assert moons["time"] == "2026-10-03T11:00+00:00" and len(moons["moons"]) == 4
+    assert events["count"] == len(events["events"]) > 0 and events["from"] == "2026-10-03T00:00+00:00"
+    assert libration["viewpoint"].startswith("geocentric") and len(libration["limb_features"]) == 45
+    assert pairs["from"] == "2026-11-01T00:00+00:00" and pairs["conjunctions"][0]["bodies"] == ["Mars", "Jupiter"]
+    assert [o["opposition"][:10] for o in best["oppositions"]] == ["2026-10-04"]
+    assert needs_site.is_error and "location" in needs_site.content[0].text
+
+
+async def test_lunar_terminator_uses_the_gazetteer(moab, monkeypatch):
+    async def features():
+        return [{"name": "Ptolemaeus", "type": "crater", "latitude": -9.16, "longitude": -1.84, "diameter_km": 153.7},
+                {"name": "Langrenus", "type": "crater", "latitude": -8.86, "longitude": 61.04, "diameter_km": 131.98}]
+
+    monkeypatch.setattr(lunar, "get_features", features)
+    async with Client(mcp) as client:
+        data = (await client.call_tool("get_lunar_terminator", {"time": "2026-10-18T21:00", "feature_types": ["crater"]})).structured_content
+    assert [f["name"] for f in data["features"]] == ["Ptolemaeus"]
+    assert data["features"][0]["lighting"] == "sunrise" and data["time"] == "2026-10-18T21:00-06:00"
 
 
 async def test_instructions_guide_without_overreaching():
