@@ -15,7 +15,7 @@ from pydantic import Field
 
 from astronomy_mcp import (
     airquality, almanac, catalog, conditions, darksites, horizon, jupiter, lightpollution, location, lunar, planner,
-    simbad, sky, space, vsx,
+    satellites, simbad, sky, smallbodies, space, vsx,
 )
 from astronomy_mcp.http import UpstreamError
 from astronomy_mcp.location import Location
@@ -28,8 +28,8 @@ mcp = MCPServer(
     instructions=(
         "Tools for observational astronomy: what is in the sky from a given place and time, whether "
         "and when something can be seen, observing conditions (clouds, darkness, light pollution, "
-        "terrain), sourced catalog facts about celestial objects, eclipses, space weather and rocket "
-        "launches.\n\n"
+        "terrain), sourced catalog facts about celestial objects, comets, asteroids, satellites, "
+        "eclipses, space weather and rocket launches.\n\n"
         "When an answer depends on the date, time or the observer's location (what is up tonight, "
         "where a planet is, rise/set or twilight times, Moon phase, whether an object is visible, the "
         "cloud forecast, how dark a site is), prefer calling a tool over answering from memory: these "
@@ -47,6 +47,10 @@ mcp = MCPServer(
         "Jupiter's moons or Red Spot -> get_jupiter_moons, get_jupiter_events; what to look at on the "
         "Moon -> get_lunar_terminator, get_moon_libration; planets close together or at their best -> "
         "find_conjunctions, find_oppositions; "
+        "comets -> get_comet_visibility; where an asteroid or comet is -> get_asteroid_ephemeris; "
+        "asteroids passing Earth -> find_close_approaches; bolides -> get_fireball_reports; ISS "
+        "sightings -> get_iss_passes; other satellites -> get_satellite_passes; 'what is that moving "
+        "light' -> find_satellites_overhead; Starlink trains -> get_starlink_trains; "
         "aurora -> get_space_weather; launches -> get_upcoming_launches.\n\n"
         "Location: tools take latitude/longitude or a place name, and otherwise use the saved "
         "default. When the user says where they observe from, call set_default_location once. If no "
@@ -1009,6 +1013,227 @@ async def get_moon_libration(
     """
     loc = await _location_or_none(latitude, longitude, place)
     return lunar.libration(sky.parse_time(time, loc or Location(0.0, 0.0)), loc)
+
+
+# ================================================================ comets, asteroids and fireballs
+
+@tool(annotations=READ_ONLY)
+async def get_comet_visibility(
+    comet: Annotated[str | None, Field(description="A comet to look at, e.g. '12P', 'C/2025 R2', 'Tempel 2'. Omit to list the bright comets now.")] = None,
+    max_magnitude: Annotated[float, Field(ge=0, le=18, description="Without a comet: only list comets at least this bright")] = 12.0,
+    limit: Annotated[int, Field(ge=1, le=30, description="Without a comet: maximum comets to list")] = 10,
+    days: Annotated[int, Field(ge=1, le=120, description="With a comet: how many days of brightness and position trend")] = 30,
+    date: DATE = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Which comets are bright enough to see now, or how one comet will look over the coming weeks.
+
+    Use for 'are there any comets visible', 'can I see comet X tonight' or 'when is comet X at
+    its best'. Without a comet: the comets at or brighter than max_magnitude, brightest first,
+    with constellation, morning or evening sky, the equipment needed and, with a location, the
+    best time and altitude tonight. Brightness is from COBS observer reports where available,
+    otherwise JPL's prediction. With a comet: tonight's view plus a day-by-day trend (JPL
+    Horizons). Comet brightness is hard to predict; present magnitudes as estimates.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    day = sky.observing_date(date, loc) if loc else None
+    if comet:
+        return await smallbodies.comet_detail(comet, loc, day, days)
+    return await smallbodies.bright_comets(loc, day, max_magnitude, limit)
+
+
+@tool(annotations=READ_ONLY)
+async def get_asteroid_ephemeris(
+    target: Annotated[str, Field(description="Asteroid or comet name, number or designation, e.g. 'Vesta', '4', 'Apophis', '2024 YR4', '12P'")],
+    start: Annotated[str | None, Field(description="First time, ISO 8601; without an offset it is the observer's local time. Omit for now.")] = None,
+    days: Annotated[float, Field(gt=0, le=366, description="How many days to cover")] = 7,
+    step_hours: Annotated[float, Field(ge=0.25, le=720, description="Hours between rows (24 for daily)")] = 24,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Where an asteroid (or comet) is and how bright, as a table over time, from JPL Horizons.
+
+    Use for 'where is Vesta', 'how bright will Apophis get' or 'finder positions for asteroid X'.
+    Rows give RA/Dec, constellation, magnitude, motion across the sky, distances and elongation
+    from the Sun; with a location, also altitude and direction. Also returns the object's
+    orbit class, size, albedo and whether it is a near-Earth or potentially hazardous object.
+    Up to 500 rows.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    when = sky.parse_time(start, loc or Location(0.0, 0.0))
+    return await smallbodies.ephemeris(target, loc, when, days, step_hours)
+
+
+@tool(annotations=READ_ONLY)
+async def find_close_approaches(
+    start_date: Annotated[str | None, Field(description="First day (YYYY-MM-DD), may be in the past; omit for now")] = None,
+    days: Annotated[int, Field(ge=1, le=3650, description="How many days to search")] = 60,
+    max_distance_lunar: Annotated[float, Field(gt=0, le=200, description="Only approaches closer than this many lunar distances (1 LD = 384,399 km)")] = 10,
+    max_absolute_magnitude: Annotated[float | None, Field(ge=5, le=35, description="Only objects with H at or below this (smaller H is bigger: H 22 is roughly 100-250 m)")] = None,
+    limit: Annotated[int, Field(ge=1, le=100, description="Maximum approaches")] = 25,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Asteroids and comets passing close to Earth, in time order (JPL Close Approach Data).
+
+    Use for 'any asteroids passing Earth this month', 'how close did X come' or 'next close
+    approach of Apophis'. Gives time, distance in lunar distances and km, speed, absolute
+    magnitude and size. A location only adds local times. Whether one is observable needs
+    get_asteroid_ephemeris.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return await smallbodies.close_approaches(_range_start(start_date, loc), days, max_distance_lunar,
+                                              max_absolute_magnitude, limit, loc)
+
+
+@tool(annotations=READ_ONLY)
+async def get_fireball_reports(
+    days: Annotated[int, Field(ge=1, le=12000, description="How many days back to look")] = 365,
+    limit: Annotated[int, Field(ge=1, le=100, description="Maximum events, newest first")] = 20,
+    max_distance_km: Annotated[float | None, Field(gt=0, le=20000, description="Only events within this distance of the observer")] = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Large fireballs (bolides) detected by US government sensors, newest first (CNEOS).
+
+    Use for 'was that huge fireball last night recorded', 'recent bolides near me' or 'how often
+    do big fireballs happen'. Gives time, position, altitude, speed and energy; with a location,
+    the distance and whether it was above the observer's horizon. Only metre-scale and larger
+    impacts are listed, and reports lag by days to weeks; ordinary bright meteors aren't here.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    if max_distance_km and loc is None:
+        raise ValueError("max_distance_km needs a location.")
+    return await smallbodies.fireballs(days, limit, loc, max_distance_km)
+
+
+# ================================================================ satellites
+
+PASS_DAYS = Annotated[float, Field(gt=0, le=10, description="How many days ahead (predictions drift after a few days)")]
+SAT_MIN_ALT = Annotated[float, Field(ge=0, le=80, description="Only count the satellite while at least this high, degrees")]
+
+
+@tool(annotations=READ_ONLY)
+async def get_iss_passes(
+    days: PASS_DAYS = 5,
+    min_altitude: SAT_MIN_ALT = 10,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """When the International Space Station will be visible from the observer's location.
+
+    Use for 'when can I see the ISS' or 'is the space station going over tonight'. Lists passes
+    where the ISS is sunlit against a dark sky: where it appears, its highest point and where it
+    vanishes (often fading into Earth's shadow mid-sky), with local times to the second and an
+    estimated magnitude. Computed from CelesTrak orbital elements with SGP4.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    return await _satellite_passes(loc, "25544", days, min_altitude, False, None)
+
+
+@tool(annotations=READ_ONLY)
+async def get_satellite_passes(
+    satellite: Annotated[str, Field(description="NORAD catalog number, a common name ('ISS', 'Tiangong', 'Hubble') or a CelesTrak name ('STARLINK-1234', 'NOAA 19')")],
+    days: PASS_DAYS = 5,
+    min_altitude: SAT_MIN_ALT = 10,
+    include_daylight: Annotated[bool, Field(description="Also list passes that can't be seen (daylight or Earth's shadow), e.g. for radio")] = False,
+    standard_magnitude: Annotated[float | None, Field(ge=-5, le=15, description="Satellite's magnitude at 1000 km and half phase, if known; enables brightness estimates")] = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Upcoming passes of any Earth satellite over the observer, by name or NORAD number.
+
+    Use for 'when does Hubble pass over', 'Tiangong passes this week' or a specific NORAD id.
+    By default only visible passes (satellite sunlit, observer's sky dark), with where it
+    appears, peaks and vanishes. Brightness is estimated for the ISS, Tiangong, Hubble and
+    Starlink, or any satellite given standard_magnitude. For the ISS, get_iss_passes is simpler.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    return await _satellite_passes(loc, satellite, days, min_altitude, include_daylight, standard_magnitude)
+
+
+async def _satellite_passes(loc: Location, satellite: str, days: float, min_altitude: float,
+                            include_daylight: bool, standard_magnitude: float | None) -> dict[str, Any]:
+    sat = await satellites.find_satellite(satellite, standard_magnitude)
+    start = datetime.now(UTC)
+    found = satellites.passes(sat, loc, start, days, min_altitude, include_daylight)
+    return {
+        "satellite": {k: v for k, v in sat.info().items() if v is not None},
+        "location": loc.name,
+        "from": sky.fmt(start, loc),
+        "days": days,
+        "count": len(found),
+        "passes": found,
+        "note": satellites.element_age_note(sat, start, days)
+                + (" No brightness estimate: pass standard_magnitude if you know it." if sat.standard_magnitude is None else
+                   " Magnitudes are estimates (±1).")
+                + (" No visible passes in this period. A satellite shows only while sunlit against a dark sky, so "
+                   "there are often a week or more without visible passes; try more days."
+                   if not found and not include_daylight else ""),
+    }
+
+
+@tool(annotations=READ_ONLY)
+async def find_satellites_overhead(
+    time: TIME = None,
+    group: Annotated[Literal[satellites.GROUPS], Field(description="Which satellites: visual (about 150 of the brightest), stations, starlink, or active (all ~16,000; slower first download)")] = "visual",  # type: ignore[valid-type]
+    min_altitude: SAT_MIN_ALT = 10,
+    visible_only: Annotated[bool, Field(description="Only satellites that are sunlit while the observer's sky is dark")] = True,
+    limit: Annotated[int, Field(ge=1, le=200, description="Maximum satellites")] = 25,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Satellites above the observer right now (or at a given time): where each is and where it's heading.
+
+    Use for 'what is that moving light' or 'what satellites are up now'. Lists each satellite's
+    altitude, direction, distance, whether it is lit by the Sun, estimated magnitude where known,
+    and where it will leave view (setting or fading into Earth's shadow). Brightest first.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    when = sky.parse_time(time, loc)
+    sats = await satellites.group(group)
+    found = satellites.overhead(sats, loc, when, min_altitude, visible_only)
+    sun_alt = sky.sun_altitude(when, loc)
+    out = {
+        "time": when.astimezone(loc.tz).isoformat(timespec="seconds"),
+        "location": loc.name,
+        "group": group,
+        "sun_altitude_deg": round(sun_alt, 1),
+        "total": len(found),
+        "count": min(limit, len(found)),
+        "satellites": found[:limit],
+        "note": "Magnitudes are only estimated for the ISS, Tiangong, Hubble and Starlink."
+                + (" The Sun is up or the sky is too bright to see satellites." if sun_alt >= satellites.SUN_LIMIT_DEG else ""),
+    }
+    return out
+
+
+@tool(annotations=READ_ONLY)
+async def get_starlink_trains(
+    days: Annotated[float, Field(gt=0, le=7, description="How many days ahead to look for passes")] = 3,
+    max_launch_age_days: Annotated[float, Field(gt=0, le=30, description="Only batches launched within this many days")] = 21,
+    min_altitude: SAT_MIN_ALT = 10,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Recently launched Starlink batches and when their 'train' of satellites passes over.
+
+    Use for 'I saw a line of lights moving across the sky' or 'when can I see a Starlink
+    train'. For each batch launched in the last few weeks: satellite count, altitude, how
+    stretched out the line is, and visible passes with times for the first and last satellite.
+    Trains are best in the first days after launch and disperse within a few weeks.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    return await satellites.starlink_trains(loc, datetime.now(UTC), days, max_launch_age_days, min_altitude)
 
 
 # ================================================================ space weather and spaceflight

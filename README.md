@@ -18,6 +18,10 @@ No API keys are required. Every source is free and public:
 | [7Timer! ASTRO](https://www.7timer.info/) | Astronomical seeing and transparency |
 | [NOAA SWPC](https://www.swpc.noaa.gov/) | Kp index, geomagnetic storm forecast, OVATION aurora nowcast |
 | [Launch Library 2](https://thespacedevs.com/llapi) | Upcoming rocket launches (15 requests/hour, so cached 15 min) |
+| [JPL Solar System Dynamics](https://ssd-api.jpl.nasa.gov/) | Comet and asteroid orbits and physical data (SBDB), ephemerides (Horizons), Earth close approaches (CAD) |
+| [CNEOS fireballs](https://cneos.jpl.nasa.gov/fireballs/) | Bolides detected by US government sensors |
+| [COBS](https://cobs.si/) | Observed comet brightness, fitted to observers' reports |
+| [CelesTrak](https://celestrak.org/) | Satellite orbital elements, propagated with [SGP4](https://pypi.org/project/sgp4/) (cached 2 hours, as CelesTrak asks) |
 
 ## Tools
 
@@ -78,6 +82,24 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | `get_jupiter_events` | Upcoming moon transits, shadow transits, occultations, eclipses and Red Spot transits, flagged for your sky |
 | `get_lunar_terminator` | Named craters, mountains and rilles in low sunlight on the terminator, with the Sun's height at each |
 | `get_moon_libration` | Libration angles, the favoured limb, and which limb features (Mare Orientale, Bailly, polar craters) are well placed |
+
+**Comets, asteroids and fireballs**
+
+| Tool | What it does |
+| --- | --- |
+| `get_comet_visibility` | Comets bright enough to see now, with where and when tonight; or one comet's view tonight and its brightness trend |
+| `get_asteroid_ephemeris` | Position, brightness, motion and altitude over time for any asteroid or comet, plus its size and orbit class |
+| `find_close_approaches` | Asteroids and comets passing near Earth: time, distance in lunar distances, speed, size |
+| `get_fireball_reports` | Recent large bolides: time, place, energy, and whether one was above your horizon |
+
+**Satellites**
+
+| Tool | What it does |
+| --- | --- |
+| `get_iss_passes` | Visible ISS passes: where it appears, peaks and vanishes, to the second, with brightness |
+| `get_satellite_passes` | The same for any satellite by name or NORAD number, optionally including passes you can't see |
+| `find_satellites_overhead` | What's up right now, where each satellite is heading, and when it leaves view |
+| `get_starlink_trains` | Recent Starlink batches, how stretched out each train is, and when it passes over |
 
 **Catalogs**
 
@@ -174,6 +196,8 @@ Layout of `src/astronomy_mcp/`:
 - `jupiter.py`: Galilean moon geometry seen from Earth and from the Sun, event search, central meridian and Great Red Spot. `GRS_LONGITUDE` there needs a yearly update.
 - `lunar.py`: the Moon's orientation (libration, subsolar point), the terminator, and the USGS feature gazetteer.
 - `almanac.py`: conjunctions and oppositions.
+- `smallbodies.py`: two-body comet orbits, the bright-comet list (COBS brightness, Horizons positions), Horizons ephemerides, close approaches and fireballs.
+- `satellites.py`: CelesTrak elements, SGP4 to topocentric, Earth's shadow, brightness, pass search, satellites overhead and Starlink trains.
 - `lightpollution.py`, `darksites.py`, `horizon.py`: atlas lookup, dark-site search, terrain horizon.
 - `catalog.py`, `simbad.py`, `vsx.py`, `location.py`, `space.py`: one module per data source.
 - `http.py`: shared HTTP client with an in-memory TTL cache.
@@ -188,4 +212,7 @@ Service notes:
 
 - `www.aavso.org` is behind a Cloudflare bot challenge, so the VSX client calls `vsx.aavso.org` directly.
 - Open-Meteo counts every coordinate against a 600-per-minute limit, so horizon profiles use 433 points and fall back to OpenTopoData.
+- CelesTrak blocks clients that download the same file more than once every two hours, so satellite elements are cached on disk for two hours, and a stale copy is used if a refresh fails.
+- Horizons accepts `DES=<SPK-ID>;` for both comets and asteroids, but a bare SPK-ID fails for most asteroids, so names are resolved with SBDB first. Comets add `CAP;NOFRAG` to get the current apparition.
+- SBDB's elements for a periodic comet can be from an earlier apparition (10P's are from 2015), so two-body positions can be degrees off. The bright-comet list uses them only to pick candidates.
 - Public Overpass servers are often overloaded. `find_dark_sites` asks several mirrors at once and still returns sites, flagged as unchecked for access, if none answer.

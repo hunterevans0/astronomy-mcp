@@ -1,7 +1,7 @@
 [project]
 name = "astronomy-mcp"
 version = "0.3.0"
-description = "MCP server for astronomy: catalogs, sky positions, observing plans, light pollution, terrain, sky conditions, space weather and launches"
+description = "MCP server for astronomy: catalogs, sky positions, observing plans, light pollution, terrain, sky conditions, comets, asteroids, satellites, space weather and launches"
 readme = "README.md"
 authors = [
     { name = "Hunter Evans", email = "moab@flibit.com" }
@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.28.1",
     "mcp[cli]>=2.2.0",
     "pillow>=12.3.0",
+    "sgp4>=2.24",
     "tzdata>=2026.4",
 ]
 

@@ -21,6 +21,10 @@ EXPECTED_TOOLS = {
     "whats_up_tonight", "is_visible_tonight", "get_sky_forecast", "get_limiting_magnitude",
     "get_light_pollution", "find_dark_sites", "get_horizon_profile",
     "get_transparency_drivers", "best_night_this_month", "find_dark_moon_weekends",
+    # comets, asteroids, fireballs
+    "get_comet_visibility", "get_asteroid_ephemeris", "find_close_approaches", "get_fireball_reports",
+    # satellites
+    "get_iss_passes", "get_satellite_passes", "find_satellites_overhead", "get_starlink_trains",
     # space
     "get_space_weather", "get_upcoming_launches",
 }
