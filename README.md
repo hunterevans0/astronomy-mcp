@@ -22,6 +22,12 @@ No API keys are required. Every source is free and public:
 | [CNEOS fireballs](https://cneos.jpl.nasa.gov/fireballs/) | Bolides detected by US government sensors |
 | [COBS](https://cobs.si/) | Observed comet brightness: light-curve fits and individual observers' reports |
 | [Project Pluto](https://www.projectpluto.com/grs_lon.txt) | JUPOS measurements of the Great Red Spot's longitude (fetched weekly) |
+| [Washington Double Star catalog](https://www.astro.gsu.edu/wds/) via [VizieR](https://vizier.cds.unistra.fr/) | Double and multiple stars: separations, position angles, magnitudes |
+| [AAVSO International Database](https://www.aavso.org/) (via VSX) | Recent variable-star observations and light curves |
+| [Latest Supernovae](https://www.rochesterastronomy.org/supernova.html) (D. Bishop) | Active supernovae brighter than magnitude 17, and novae in other galaxies (cached 6 hours) |
+| [Recent Galactic novae](https://asd.gsfc.nasa.gov/Koji.Mukai/novae/novae.html) (K. Mukai, NASA GSFC) | Novae in our Galaxy with discovery dates and peak magnitudes |
+| [ALeRCE](https://alerce.science/) | Machine-classified supernova candidates from ZTF alerts |
+| [DSN Now](https://eyes.nasa.gov/dsn/dsn.html) | Live Deep Space Network antenna activity |
 | [CelesTrak](https://celestrak.org/) | Satellite orbital elements, propagated with [SGP4](https://pypi.org/project/sgp4/) (cached 2 hours, as CelesTrak asks), and the satellite catalog's radar sizes for rough brightness |
 
 ## Tools
@@ -105,6 +111,17 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | `get_starlink_trains` | Recent Starlink batches (including ones not yet named in the catalog), how stretched out each train is, and when it passes over |
 | `predict_iss_transit` | The ISS crossing the Sun or Moon: the nearest point on the centerline, path width, time to the millisecond |
 
+**Double stars, variable stars and transients**
+
+| Tool | What it does |
+| --- | --- |
+| `get_double_star` | Every pair in a double or multiple star, and whether your telescope can split each and at what power |
+| `find_splittable_doubles` | Doubles your aperture and seeing can split, brightest first, optionally just those up tonight |
+| `get_variable_star_status` | Latest AAVSO brightness, trend, place in its range (outburst?), next maximum or eclipse |
+| `get_light_curve` | Binned AAVSO light curve by band, up to two years |
+| `get_recent_supernovae` | Supernovae bright enough for amateurs, with host, type, magnitudes and tonight's visibility; optional ALeRCE candidates |
+| `get_novae` | Recent Galactic novae with peak and current brightness; optionally novae in M31 and other galaxies |
+
 **Catalogs**
 
 | Tool | What it does |
@@ -120,6 +137,7 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | --- | --- |
 | `get_space_weather` | Kp now and 3-day forecast, storm level, aurora probability at your location |
 | `get_upcoming_launches` | Upcoming launches with windows, rockets, missions, pads and distance from you |
+| `get_dsn_status` | Which spacecraft the Deep Space Network is talking to now, how far away, and whether data is flowing |
 
 Targets can be planets, `Moon`, catalog names (`M31`, `NGC 7000`, `Caldwell 14`), common names (`Ring Nebula`) or anything SIMBAD resolves. Times come back in the observer's local time with a UTC offset. Coordinates are ICRS/J2000 decimal degrees.
 
@@ -203,7 +221,10 @@ Layout of `src/astronomy_mcp/`:
 - `smallbodies.py`: two-body comet orbits, the bright-comet list (COBS brightness, Horizons positions), Horizons ephemerides, close approaches and fireballs.
 - `satellites.py`: CelesTrak elements, SGP4 to topocentric, Earth's shadow, brightness, pass search, satellites overhead and Starlink trains.
 - `lightpollution.py`, `darksites.py`, `horizon.py`: atlas lookup, dark-site search, terrain horizon.
-- `catalog.py`, `simbad.py`, `vsx.py`, `location.py`, `space.py`: one module per data source.
+- `doubles.py`: WDS queries and the rule of thumb for splitting a pair (Dawes limit, seeing, brightness difference).
+- `variables.py`: AAVSO observations, trends, range position, predicted maxima and eclipses, light curves.
+- `transients.py`: the Latest Supernovae and Galactic novae pages, and ALeRCE candidates.
+- `catalog.py`, `simbad.py`, `vsx.py`, `location.py`, `space.py`, `dsn.py`: one module per data source.
 - `http.py`: shared HTTP client with an in-memory TTL cache.
 
 To add a data source, write a client module and register tools in `server.py` with `@tool()`. [ROADMAP.md](ROADMAP.md) lists candidates.
@@ -220,5 +241,7 @@ Service notes:
 - Horizons accepts `DES=<SPK-ID>;` for both comets and asteroids, but a bare SPK-ID fails for most asteroids, so names are resolved with SBDB first. Comets add `CAP;NOFRAG` to get the current apparition.
 - SBDB's elements for a periodic comet can be from an earlier apparition (10P's are from 2015), so two-body positions can be degrees off. The bright-comet list uses them only to pick candidates.
 - JUPOS itself only publishes the Red Spot's longitude as a chart image, so the measurements come from Project Pluto's `grs_lon.txt`. The newer of that table's last point and the built-in value wins.
-- Sources looked at and not used: the American Meteor Society's fireball data (the public viewer's data files are deliberately obfuscated, and the keyed API was down), and Mini-MegaTORTORA's satellite magnitudes (its `robots.txt` disallows automated access).
+- Sources looked at and not used: the American Meteor Society's fireball data (the public viewer's data files are deliberately obfuscated, and the keyed API was down); Mini-MegaTORTORA's satellite magnitudes (its `robots.txt` disallows automated access); TNS, which asks scripted clients to register bot credentials; ASAS-SN Sky Patrol, whose API server did not answer; and the Fink broker, which was unreachable.
+- AAVSO observations come from `vsx.aavso.org` (`view=api.delim`) with `|` as delimiter, since some fields contain commas. Busy stars have tens of thousands of observations a year, so light curves stop at two years.
+- The Latest Supernovae page is about 3.5 MB and asks crawlers to wait 10 s between requests; it is cached for 6 hours.
 - Public Overpass servers are often overloaded. `find_dark_sites` asks several mirrors at once and still returns sites, flagged as unchecked for access, if none answer.

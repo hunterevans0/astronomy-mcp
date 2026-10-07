@@ -56,6 +56,13 @@ CALLS = [
     ("find_satellites_overhead", {"place": "Moab, Utah", "visible_only": False, "limit": 3}),
     ("get_starlink_trains", {"place": "Moab, Utah"}),
     ("predict_iss_transit", {"place": "Moab, Utah", "max_distance_km": 100}),
+    ("get_double_star", {"name": "epsilon Lyrae", "aperture_mm": 100}),
+    ("find_splittable_doubles", {"aperture_mm": 150, "place": "Moab, Utah", "limit": 5}),
+    ("get_variable_star_status", {"name": "SS Cyg"}),
+    ("get_light_curve", {"name": "Mira", "days": 120}),
+    ("get_recent_supernovae", {"place": "Moab, Utah", "limit": 3, "include_candidates": True}),
+    ("get_novae", {"place": "Moab, Utah", "include_extragalactic": True}),
+    ("get_dsn_status", {}),
     ("get_space_weather", {"place": "Fairbanks, Alaska"}),
     ("get_upcoming_launches", {"limit": 2}),
 ]

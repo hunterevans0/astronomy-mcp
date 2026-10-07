@@ -69,6 +69,48 @@ def constellation_abbrev(value: str) -> str | None:
     return None
 
 
+GENITIVES = {
+    "And": "Andromedae", "Ant": "Antliae", "Aps": "Apodis", "Aqr": "Aquarii", "Aql": "Aquilae", "Ara": "Arae",
+    "Ari": "Arietis", "Aur": "Aurigae", "Boo": "Bootis", "Cae": "Caeli", "Cam": "Camelopardalis", "Cnc": "Cancri",
+    "CVn": "Canum Venaticorum", "CMa": "Canis Majoris", "CMi": "Canis Minoris", "Cap": "Capricorni", "Car": "Carinae",
+    "Cas": "Cassiopeiae", "Cen": "Centauri", "Cep": "Cephei", "Cet": "Ceti", "Cha": "Chamaeleontis", "Cir": "Circini",
+    "Col": "Columbae", "Com": "Comae Berenices", "CrA": "Coronae Australis", "CrB": "Coronae Borealis", "Crv": "Corvi",
+    "Crt": "Crateris", "Cru": "Crucis", "Cyg": "Cygni", "Del": "Delphini", "Dor": "Doradus", "Dra": "Draconis",
+    "Equ": "Equulei", "Eri": "Eridani", "For": "Fornacis", "Gem": "Geminorum", "Gru": "Gruis", "Her": "Herculis",
+    "Hor": "Horologii", "Hya": "Hydrae", "Hyi": "Hydri", "Ind": "Indi", "Lac": "Lacertae", "Leo": "Leonis",
+    "LMi": "Leonis Minoris", "Lep": "Leporis", "Lib": "Librae", "Lup": "Lupi", "Lyn": "Lyncis", "Lyr": "Lyrae",
+    "Men": "Mensae", "Mic": "Microscopii", "Mon": "Monocerotis", "Mus": "Muscae", "Nor": "Normae", "Oct": "Octantis",
+    "Oph": "Ophiuchi", "Ori": "Orionis", "Pav": "Pavonis", "Peg": "Pegasi", "Per": "Persei", "Phe": "Phoenicis",
+    "Pic": "Pictoris", "Psc": "Piscium", "PsA": "Piscis Austrini", "Pup": "Puppis", "Pyx": "Pyxidis", "Ret": "Reticuli",
+    "Sge": "Sagittae", "Sgr": "Sagittarii", "Sco": "Scorpii", "Scl": "Sculptoris", "Sct": "Scuti", "Ser": "Serpentis",
+    "Sex": "Sextantis", "Tau": "Tauri", "Tel": "Telescopii", "Tri": "Trianguli", "TrA": "Trianguli Australis",
+    "Tuc": "Tucanae", "UMa": "Ursae Majoris", "UMi": "Ursae Minoris", "Vel": "Velorum", "Vir": "Virginis",
+    "Vol": "Volantis", "Vul": "Vulpeculae",
+}
+GREEK = {
+    "alpha": "alf", "beta": "bet", "gamma": "gam", "delta": "del", "epsilon": "eps", "zeta": "zet", "eta": "eta",
+    "theta": "tet", "iota": "iot", "kappa": "kap", "lambda": "lam", "mu": "mu.", "nu": "nu.", "xi": "ksi",
+    "omicron": "omi", "pi": "pi.", "rho": "rho", "sigma": "sig", "tau": "tau", "upsilon": "ups", "phi": "phi",
+    "chi": "chi", "psi": "psi", "omega": "ome",
+}
+_GENITIVE_TO_ABBR = {name.lower(): abbr for abbr, name in GENITIVES.items()}
+
+
+def bayer_to_simbad(name: str) -> str | None:
+    """'epsilon Lyrae' -> 'eps Lyr', 'Alpha Centauri' -> 'alf Cen', '61 Cygni' -> '61 Cyg'; None if not that form."""
+    m = re.match(r"^\s*([A-Za-z]+|\d+)\s*(\d?)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)\s*$", name)
+    if not m:
+        return None
+    star, number, constellation = m.group(1), m.group(2), m.group(3)
+    abbr = _GENITIVE_TO_ABBR.get(constellation.lower()) or constellation_abbrev(constellation)
+    if abbr is None:
+        return None
+    if star.isdigit():
+        return f"{star} {abbr}"
+    letter = GREEK.get(star.lower())
+    return f"{letter}{number} {abbr}" if letter else None
+
+
 _KEY_RE = re.compile(r"^([a-z][a-z\-]*?)0*(\d.*)$")
 
 

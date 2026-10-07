@@ -14,8 +14,8 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from astronomy_mcp import (
-    airquality, almanac, catalog, conditions, darksites, horizon, jupiter, lightpollution, location, lunar, planner,
-    satellites, simbad, sky, smallbodies, space, vsx,
+    airquality, almanac, catalog, conditions, darksites, doubles, dsn, horizon, jupiter, lightpollution, location, lunar,
+    planner, satellites, simbad, sky, smallbodies, space, transients, variables, vsx,
 )
 from astronomy_mcp.http import UpstreamError
 from astronomy_mcp.location import Location
@@ -53,6 +53,9 @@ mcp = MCPServer(
         "asteroids passing Earth -> find_close_approaches; bolides -> get_fireball_reports; ISS "
         "sightings -> get_iss_passes; other satellites -> get_satellite_passes; 'what is that moving "
         "light' -> find_satellites_overhead; Starlink trains -> get_starlink_trains; "
+        "double stars -> get_double_star, find_splittable_doubles; how a variable star is doing -> "
+        "get_variable_star_status, get_light_curve; supernovae -> get_recent_supernovae; novae -> "
+        "get_novae; which spacecraft NASA is talking to -> get_dsn_status; "
         "aurora -> get_space_weather; launches -> get_upcoming_launches.\n\n"
         "Location: tools take latitude/longitude or a place name, and otherwise use the saved "
         "default. When the user says where they observe from, call set_default_location once. If no "
@@ -1325,6 +1328,164 @@ async def get_starlink_trains(
     """
     loc = await location.resolve(latitude, longitude, place)
     return await satellites.starlink_trains(loc, datetime.now(UTC), days, max_launch_age_days, min_altitude)
+
+
+# ================================================================ double stars, variables and transients
+
+def _night_times(loc: Location | None, date: str | None) -> list[datetime] | None:
+    """25 times across the darkest part of the night, for 'is it up tonight' checks."""
+    if loc is None:
+        return None
+    n = sky.night(loc, sky.observing_date(date, loc))
+    return [n.window[0] + (n.window[1] - n.window[0]) * i / 24 for i in range(25)]
+
+
+SEEING = Annotated[float, Field(ge=0.3, le=6, description="Typical seeing (star blur) in arcseconds: 1 excellent, 2 average, 3-4 poor")]
+
+
+@tool(annotations=READ_ONLY)
+async def get_double_star(
+    name: Annotated[str, Field(description="Star name ('Albireo', 'epsilon Lyrae', 'Mizar'), WDS id ('19307+2758') or discoverer designation ('STF 2382')")],
+    aperture_mm: Annotated[float | None, Field(gt=0, le=2000, description="Telescope aperture in mm, to judge whether each pair can be split")] = None,
+    seeing_arcsec: SEEING = 2.0,
+) -> dict[str, Any]:
+    """Every catalogued pair in a double or multiple star, and whether a telescope can split each.
+
+    Use for 'can my 4-inch split epsilon Lyrae', 'how far apart are Albireo's stars' or 'what
+    are the components of Castor'. From the Washington Double Star catalog: separation and
+    position angle at the latest measurement, magnitudes and spectral types; with an aperture,
+    a split verdict (easy/moderate/challenging) and a magnification to try.
+    """
+    return await doubles.lookup(name, aperture_mm, seeing_arcsec)
+
+
+@tool(annotations=READ_ONLY)
+async def find_splittable_doubles(
+    aperture_mm: Annotated[float, Field(gt=0, le=2000, description="Telescope aperture in mm")] = 100,
+    seeing_arcsec: SEEING = 2.0,
+    max_primary_magnitude: Annotated[float, Field(ge=-2, le=10, description="Only pairs whose brighter star is at least this bright")] = 6.5,
+    max_separation_arcsec: Annotated[float, Field(gt=0, le=300, description="Skip pairs wider than this")] = 60,
+    constellation: Annotated[str | None, Field(description="Only pairs in this constellation (name or abbreviation)")] = None,
+    challenging_only: Annotated[bool, Field(description="Only pairs near the telescope's limit, as a test")] = False,
+    visible_tonight: Annotated[bool, Field(description="Only pairs that climb above min_altitude in tonight's dark sky (needs a location)")] = True,
+    min_altitude: MIN_ALT = 25.0,
+    date: DATE = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+    limit: Annotated[int, Field(ge=1, le=50, description="Maximum pairs")] = 20,
+) -> dict[str, Any]:
+    """Double stars a given telescope can split, brightest first, optionally just tonight's.
+
+    Use for 'good double stars for my 6-inch tonight' or 'a challenging double for a 4-inch'.
+    Searches the Washington Double Star catalog for pairs above the Dawes limit and the seeing,
+    allowing for brightness differences, and names each primary from SIMBAD.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    if constellation and catalog.constellation_abbrev(constellation) is None:
+        raise ValueError(f"'{constellation}' is not an IAU constellation name or abbreviation.")
+    times = _night_times(loc, date) if visible_tonight else None
+    out = await doubles.splittable(aperture_mm, seeing_arcsec, max_primary_magnitude, max_separation_arcsec,
+                                   catalog.constellation_abbrev(constellation) if constellation else None,
+                                   challenging_only, loc, times, min_altitude, limit)
+    if visible_tonight and loc is None:
+        out["visibility"] = "No location known, so pairs are not filtered to tonight's sky."
+    return out
+
+
+@tool(annotations=READ_ONLY)
+async def get_variable_star_status(
+    name: Annotated[str, Field(description="Variable star name: 'Mira', 'R Leo', 'SS Cyg', 'Algol', 'chi Cyg'")],
+    days: Annotated[int, Field(ge=1, le=365, description="How many days of observations to summarise")] = 30,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """How bright a variable star is right now, from recent AAVSO observations.
+
+    Use for 'is SS Cyg in outburst', 'how bright is Mira now', 'when is Algol's next eclipse' or
+    'is chi Cygni near maximum'. Gives the latest observation, medians by band over the last week,
+    the recent trend, where it sits in its range, and predicted maxima or eclipses from the period.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return await variables.status(name, days, loc)
+
+
+@tool(annotations=READ_ONLY)
+async def get_light_curve(
+    name: Annotated[str, Field(description="Variable star name, e.g. 'Mira', 'SS Cyg', 'R CrB'")],
+    days: Annotated[int, Field(ge=1, le=730, description="How many days back")] = 365,
+    bands: Annotated[list[str] | None, Field(description="Only these AAVSO bands, e.g. ['Vis.', 'V']; omit for all")] = None,
+    bin_days: Annotated[float | None, Field(gt=0, le=60, description="Bin width in days; omit to get about 150 points")] = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """A variable star's light curve from AAVSO observations, binned by band.
+
+    Use for 'plot Mira's brightness this year', 'how did SS Cyg behave lately' or to compare a
+    star's cycle with its prediction. Each point is the median magnitude in a time bin, with
+    the count of observations; up to two years.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return await variables.light_curve(name, days, bands, bin_days, loc)
+
+
+@tool(annotations=READ_ONLY)
+async def get_recent_supernovae(
+    max_magnitude: Annotated[float, Field(ge=8, le=17, description="Only supernovae at least this bright")] = 16.0,
+    limit: Annotated[int, Field(ge=1, le=50, description="Maximum supernovae")] = 15,
+    include_candidates: Annotated[bool, Field(description="Also list unconfirmed supernova candidates found by the ALeRCE broker in ZTF data (mostly fainter than 17)")] = False,
+    candidate_days: Annotated[int, Field(ge=1, le=60, description="With candidates: first detected within this many days")] = 10,
+    min_altitude: MIN_ALT = 20.0,
+    date: DATE = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Supernovae currently bright enough for amateur telescopes, brightest first.
+
+    Use for 'any bright supernovae right now', 'is there a supernova in M101' or 'what can I
+    image tonight'. Gives type, host galaxy, position, latest and peak magnitude with dates,
+    discovery date and discoverer, and with a location the best time tonight.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return await transients.recent_supernovae(max_magnitude, limit, loc, _night_times(loc, date), min_altitude,
+                                              include_candidates, candidate_days)
+
+
+@tool(annotations=READ_ONLY)
+async def get_novae(
+    days: Annotated[int, Field(ge=1, le=730, description="Discovered within this many days")] = 120,
+    include_extragalactic: Annotated[bool, Field(description="Also list novae in other galaxies, mostly M31 (magnitude 15-19)")] = False,
+    min_altitude: MIN_ALT = 15.0,
+    date: DATE = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Recent novae in our Galaxy, with peak and current brightness, newest first.
+
+    Use for 'is there a nova visible now' or 'how bright is Nova Sagittae'. Lists novae from
+    Koji Mukai's list with discovery date, peak magnitude, the latest AAVSO magnitude and with a
+    location whether it is up tonight.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return await transients.novae(days, include_extragalactic, loc, _night_times(loc, date), min_altitude)
+
+
+@tool(annotations=READ_ONLY)
+async def get_dsn_status(
+    spacecraft: Annotated[str | None, Field(description="Only contacts with this spacecraft, e.g. 'Voyager', 'JWST', 'Juno'")] = None,
+    include_antennas: Annotated[bool, Field(description="Also list every antenna at Goldstone, Madrid and Canberra with its activity and pointing")] = False,
+) -> dict[str, Any]:
+    """Which spacecraft NASA's Deep Space Network is talking to right now.
+
+    Use for 'is anyone talking to Voyager', 'what is the DSN doing' or 'how far away is Juno'.
+    Lists each spacecraft in contact, the antennas, distance and light time, and whether data
+    or commands are flowing. Live from DSN Now; contacts change every few hours.
+    """
+    return await dsn.status(spacecraft, include_antennas)
 
 
 # ================================================================ space weather and spaceflight

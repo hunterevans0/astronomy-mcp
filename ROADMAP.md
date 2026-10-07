@@ -1,6 +1,6 @@
 # Roadmap
 
-What's built (M1 to M3, most of M4) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
+What's built (M1 to M4, half of M5) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
 
 ## M1: tonight's sky (done)
 
@@ -38,20 +38,23 @@ Gaps found in M1, now closed:
 - ✅ `find_close_approaches`, `get_fireball_reports`: NEO passes with size estimates, and bolides with distance and whether they were above the observer's horizon (JPL SBDB CAD, CNEOS).
   - Still open: ordinary bright-meteor reports. The AMS site's viewer loads deliberately obfuscated data files and its keyed open API returned 503; the IMO fireball site was also down. Not worth scraping around.
 
-## M4: satellites
+## M4: satellites (done)
 
 - ✅ `get_iss_passes`, `get_satellite_passes`: visible passes with appear, peak and vanish points and an estimated magnitude (CelesTrak GP elements, sgp4). Checked against Skyfield: positions agree to under an arcminute and rise times to about a second. Earth's shadow is a cylinder, so fade times can be off by a few seconds.
   - Partly done: satellites without a built-in value get a rough standard magnitude from CelesTrak's radar cross-section (±1.5 mag; RCS is missing for many newer objects). Measured values would be better: McCants' list is offline and Mini-MegaTORTORA's database disallows automated access in `robots.txt`.
 - ✅ `find_satellites_overhead`, `get_starlink_trains`: what's up now and where it's heading, and recent Starlink batches with how stretched out each train is and when it passes.
   - ✅ Unnamed batches are matched to Launch Library's Starlink launches by COSPAR designator, which also gives the exact launch time. A batch still only appears once CelesTrak has orbits for it.
 - ✅ `predict_iss_transit`: the ISS (or any satellite) crossing the Sun or Moon. Projects the line from the body's centre through the satellite onto the ground to get the centerline, then reports the nearest point on it, path width, crossing time to the millisecond, and what the observer's own spot sees.
-- `get_dsn_status`: which spacecraft the Deep Space Network is talking to (DSN Now XML).
+- ✅ `get_dsn_status`: which spacecraft the Deep Space Network is talking to, with distance, light time and whether data or commands are flowing (DSN Now XML, refreshed every few seconds).
 
 ## M5: stars, variables, transients, exoplanets
 
-- `get_double_star`, `find_splittable_doubles`: WDS via VizieR, matched to aperture and seeing.
-- `get_variable_star_status`, `get_light_curve`: AAVSO observations, ASAS-SN Sky Patrol.
-- `get_recent_supernovae`, `get_novae`: TNS (free key), ALeRCE / Fink brokers.
+- ✅ `get_double_star`, `find_splittable_doubles`: WDS via VizieR TAP, names from SIMBAD (Bayer names like 'epsilon Lyrae' are translated). Splitting uses a rule of thumb: max(Dawes, 0.6 x seeing) x (1 + 0.3 dm), steeper past 5 magnitudes, tuned so Antares is borderline in 100 mm and Sirius B challenging.
+  - Still open: binary orbits (the Sixth Orbit Catalog) for current separations of fast-moving pairs; WDS gives the last measurement.
+- ✅ `get_variable_star_status`, `get_light_curve`: AAVSO International Database through VSX, with trend, position in the range, outburst flag for dwarf novae, and next maximum or eclipse from VSX's period and epoch.
+  - Still open: ASAS-SN Sky Patrol. Its API (port 9006 at asassn-lb01.ifa.hawaii.edu, Arrow-format responses) did not answer, and it would need pyarrow.
+- ✅ `get_recent_supernovae`, `get_novae`: the Latest Supernovae page (curated, all active supernovae brighter than 17) and Koji Mukai's Galactic nova list, with current magnitudes from AAVSO; optional ALeRCE candidates (light-curve classes at probability >= 0.4, plus the first-image classifier at >= 0.8) and novae in M31 and other galaxies.
+  - Still open: TNS, which needs registered bot credentials (could be read from environment variables), and the Fink broker, which was unreachable.
 - `get_exoplanet`, `search_exoplanets`, `get_transits_tonight`: NASA Exoplanet Archive TAP.
 - `get_gravitational_wave_events`: GWOSC / GraceDB.
 

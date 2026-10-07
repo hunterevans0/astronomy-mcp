@@ -26,8 +26,11 @@ EXPECTED_TOOLS = {
     "get_fireball_reports",
     # satellites
     "get_iss_passes", "get_satellite_passes", "find_satellites_overhead", "get_starlink_trains", "predict_iss_transit",
+    # stars, variables, transients
+    "get_double_star", "find_splittable_doubles", "get_variable_star_status", "get_light_curve",
+    "get_recent_supernovae", "get_novae",
     # space
-    "get_space_weather", "get_upcoming_launches",
+    "get_space_weather", "get_upcoming_launches", "get_dsn_status",
 }
 
 

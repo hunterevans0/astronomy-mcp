@@ -73,6 +73,19 @@ async def get_json(
     return data
 
 
+async def get_text(url: str, params: dict[str, Any] | None = None, *, source: str, ttl: float = 0,
+                   timeout: float = 30) -> str:
+    """GET a text document (XML, CSV), caching it for `ttl` seconds."""
+    key = _key(url, params)
+    hit = _cache.get(key)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    text = (await _fetch(url, params, source, timeout)).text
+    if ttl > 0:
+        _cache[key] = (time.monotonic() + ttl, text)
+    return text
+
+
 async def get_bytes(url: str, *, source: str, timeout: float = 60) -> bytes:
     """GET a raw document (used for one-off bulk downloads, never cached in memory)."""
     return (await _fetch(url, None, source, timeout)).content
