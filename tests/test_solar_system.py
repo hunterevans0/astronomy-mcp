@@ -1,5 +1,6 @@
 """Offline tests for Jupiter's moons, the Moon's libration and terminator, conjunctions and oppositions."""
 
+import math
 import struct
 from datetime import UTC, datetime, timedelta
 
@@ -92,7 +93,7 @@ def test_events_report_filters_to_what_the_site_can_see():
     assert 0 < seen["count"] < everything["count"]
     assert all(e["observable_here"] and "note" not in e for e in seen["events"])
     assert everything["events"][0]["time"].endswith("-06:00")
-    hidden = [e for e in everything["events"] if "note" in e]
+    hidden = [e for e in everything["events"] if "note" in e and not e.get("mutual")]
     assert hidden and all(e["event"].startswith(("eclipse", "occultation")) for e in hidden)
     assert "No location" in jupiter.events(start, 2, None)["note"]
 
@@ -277,3 +278,82 @@ def test_body_lon_lat():
     assert sky.body_lon_lat(north, 30.0, node)[0] == pytest.approx(-30.0)  # the body turned east under the node
     assert sky.body_lon_lat(north, 0.0, north)[1] == pytest.approx(90.0)
     assert sky.wrap180(190) == -170 and sky.wrap180(-180) == -180
+
+
+# ------------------------------------------------------------------ mutual events and the Red Spot table
+
+def test_mutual_events_match_imcce_predictions():
+    # IMCCE via the BAA: Io occults Europa 2026 Sep 23 04:29 UT lasting 3.6 min;
+    # Io eclipses Ganymede 2027 Jan 18 04:55.7 UT.
+    occultation = [e for e in jupiter.find_mutual_events(utc(2026, 9, 23, 3, 45), utc(2026, 9, 23, 5))
+                   if e["event"] == "Io occults Europa"]
+    assert len(occultation) == 1
+    assert abs((occultation[0]["time"] - utc(2026, 9, 23, 4, 29)).total_seconds()) < 180
+    assert occultation[0]["duration_min"] == pytest.approx(3.6, abs=0.5)
+    eclipse = [e for e in jupiter.find_mutual_events(utc(2027, 1, 18, 4), utc(2027, 1, 18, 6))
+               if e["event"] == "Io eclipses Ganymede"]
+    assert len(eclipse) == 1
+    assert abs((eclipse[0]["time"] - utc(2027, 1, 18, 4, 55, 42)).total_seconds()) < 90
+    assert eclipse[0]["type"] in ("partial", "total") and 0.2 < eclipse[0]["estimated_light_loss"] < 0.8
+
+
+def test_no_mutual_events_far_from_jupiters_equinox():
+    assert jupiter.find_mutual_events(utc(2024, 1, 1), utc(2024, 1, 4)) == []
+
+
+def test_circle_overlap():
+    assert jupiter.circle_overlap(1, 1, 3) == 0
+    assert jupiter.circle_overlap(1, 2, 0.5) == pytest.approx(math.pi)
+    assert jupiter.circle_overlap(1, 1, 1) == pytest.approx(2 * math.pi / 3 - math.sqrt(3) / 2)
+
+
+def test_mutual_events_are_listed_with_formatted_contacts():
+    report = jupiter.events(utc(2026, 10, 6), 24, MOAB)
+    mutual = [e for e in report["events"] if e.get("mutual")]
+    assert mutual and all(e["begins"].endswith("-06:00") and e["begins"] < e["ends"] for e in mutual)
+    assert not [e for e in jupiter.events(utc(2026, 10, 6), 24, MOAB, mutual=False)["events"] if e.get("mutual")]
+
+
+GRS_TABLE = """# See end of file for documentation
+YYYY MM DD Lon  Source/comments
+3025 12  1 16439 (extrapolation)
+2025 12  1 439   (2010-present from JUPOS)
+2024 10  1 421
+2024 01  1 410
+2022 11  1 386
+"""
+
+
+def test_red_spot_table_uses_latest_measurement_and_recent_drift():
+    model = jupiter.parse_grs_table(GRS_TABLE, datetime(2026, 10, 6).date())
+    assert model.epoch.isoformat() == "2025-12-01" and model.longitude == 439
+    assert model.drift_deg_per_day * 365.25 == pytest.approx(15.5, abs=1.5)  # about 16°/year lately
+    assert model.at(utc(2025, 12, 1)) == pytest.approx(79)
+    assert jupiter.parse_grs_table("nothing useful", datetime(2026, 1, 1).date()) is None
+
+
+# ------------------------------------------------------------------ stars and elongations
+
+def test_venus_passes_the_pleiades_in_april_2020():
+    found = almanac.conjunctions(utc(2020, 3, 25), 15, None, 2.0, body="venus", include_stars=True)
+    pleiades = [c for c in found["conjunctions"] if "Pleiades" in c["bodies"]]
+    assert len(pleiades) == 1 and pleiades[0]["time"].startswith("2020-04-03")
+    assert pleiades[0]["separation_deg"] < 0.5 and pleiades[0]["magnitudes"]["Pleiades"] == 1.6
+    assert pleiades[0]["sky"] == "evening"
+
+
+def test_moon_star_pairings_flag_possible_occultations():
+    found = almanac.conjunctions(utc(2026, 10, 1), 30, None, 1.5, include_moon=True, include_stars=True)
+    antares = [c for c in found["conjunctions"] if set(c["bodies"]) == {"Moon", "Antares"}]
+    assert antares and "occultation_possible" in antares[0]
+
+
+def test_greatest_elongations_of_2026():
+    found = almanac.greatest_elongations(utc(2026, 1, 1), 365, MOAB)["elongations"]
+    venus = [e for e in found if e["planet"] == "Venus"]
+    assert len(venus) == 1 and venus[0]["time"].startswith("2026-08-1") and venus[0]["sky"] == "evening"
+    assert venus[0]["elongation_deg"] == pytest.approx(45.9, abs=0.2)
+    february = next(e for e in found if e["planet"] == "Mercury" and e["time"].startswith("2026-02"))
+    assert february["elongation_deg"] == pytest.approx(18.1, abs=0.2)
+    assert february["at_civil_twilight"]["altitude_deg"] > 5
+    assert [e["time"] for e in found] == sorted(e["time"] for e in found)

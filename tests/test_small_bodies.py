@@ -124,3 +124,55 @@ def test_fireball_signs_and_sightline():
     assert shaped["distance_from_you_km"] == pytest.approx(1290, abs=10) and shaped["above_your_horizon"] is False
     assert smallbodies.elevation_seen_from(0.001, 30) == pytest.approx(90, abs=0.1)
     assert smallbodies.elevation_seen_from(300, 30) > 0 > smallbodies.elevation_seen_from(700, 30)
+
+
+# ------------------------------------------------------------------ bright asteroids and COBS observations
+
+CERES_ROW = dict(zip(
+    ["full_name", "pdes", "spkid", "e", "a", "i", "om", "w", "ma", "epoch", "H", "G"],
+    ["     1 Ceres (A801 AA)", "1", 20000001, ".07969229514816586", "2.765552595034094", "10.58802780183462",
+     "80.24862682043221", "73.29421453021587", "274.4193463761342", "2461200.5", "3.34", "0.12"],
+))
+
+
+def test_asteroid_elements_and_magnitude_match_horizons():
+    # JPL Horizons, 2026-10-05 00:00 UT: RA 108.28587°, Dec +23.27484°, r 2.67036, delta 2.57098, APmag 8.624
+    ceres = smallbodies._asteroid_from_row(CERES_ROW)
+    assert ceres.h == 3.34 and ceres.g == 0.12 and ceres.name == "1 Ceres (A801 AA)"
+    when = datetime(2026, 10, 5, tzinfo=UTC)
+    geo, r, delta = smallbodies.geocentric(ceres, when)
+    ra, dec = smallbodies._radec(geo)
+    assert sky.separation_deg(ra, dec, 108.28587, 23.27484) * 3600 < 30
+    assert (r, delta) == (pytest.approx(2.67036, abs=1e-4), pytest.approx(2.57098, abs=1e-4))
+    earth = smallbodies.earth_heliocentric(when)
+    helio = tuple(geo[k] + earth[k] for k in range(3))
+    assert ceres.predicted_magnitude(r, delta, smallbodies.phase_angle(helio, geo)) == pytest.approx(8.62, abs=0.05)
+
+
+def test_hg_magnitude_phase_behaviour():
+    at_opposition = smallbodies.hg_magnitude(5.0, 0.15, 2.0, 1.0, 0.0)
+    assert at_opposition == pytest.approx(5.0 + 5 * math.log10(2.0))
+    assert smallbodies.hg_magnitude(5.0, 0.15, 2.0, 1.0, 20.0) > at_opposition + 0.5
+
+
+async def test_recent_cobs_observations(monkeypatch):
+    seen = {}
+
+    async def fake_get_json(url, params=None, **kwargs):
+        seen.update(params)
+        today = datetime.now(UTC)
+        return {"info": {"recordsTotal": 3}, "objects": [
+            {"obs_date": f"{today:%Y-%m-%d} 03:55:00", "magnitude": "10.1", "obs_method": {"name": "Visual"},
+             "observer": {"first_name": "Mary", "last_name": "Olason", "country": "United States"},
+             "instrument_aperture": "9.1", "coma_diameter": "7.00", "tail_length": None},
+            {"obs_date": f"{today:%Y-%m-%d} 01:00:00", "magnitude": "10.5", "observer": {}},
+            {"obs_date": "2001-01-01 00:00:00", "magnitude": "9.0"},
+        ]}
+
+    monkeypatch.setattr(smallbodies, "get_json", fake_get_json)
+    recent = await smallbodies.recent_observations("10P", count=2)
+    assert seen["des"] == "10P" and seen["format"] == "json"
+    assert recent["count_last_30_days"] == 3 and recent["median_magnitude_last_7_days"] == 10.3
+    assert recent["latest"][0] == {"date_utc": recent["latest"][0]["date_utc"], "magnitude": 10.1, "method": "Visual",
+                                   "aperture_cm": 9.1, "coma_arcmin": 7.0, "observer": "M. Olason (United States)"}
+    assert len(recent["latest"]) == 2

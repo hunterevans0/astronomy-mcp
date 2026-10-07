@@ -17,6 +17,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from statistics import median
 from typing import Any
 
 import astronomy as ae
@@ -32,6 +33,7 @@ HORIZONS = "https://ssd.jpl.nasa.gov/api/horizons.api"
 CAD = "https://ssd-api.jpl.nasa.gov/cad.api"
 FIREBALL = "https://ssd-api.jpl.nasa.gov/fireball.api"
 COBS_LIST = "https://cobs.si/api/comet_list.api"
+COBS_OBS = "https://cobs.si/api/obs_list.api"
 
 GAUSS_K = 0.01720209895  # Gaussian gravitational constant, radians per day
 OBLIQUITY = math.radians(23.4392911)  # J2000 mean obliquity of the ecliptic
@@ -115,6 +117,8 @@ class Orbit:
     incl: float
     m1: float | None = None
     k1: float | None = None
+    h: float | None = None  # asteroid absolute magnitude and slope (IAU H, G system)
+    g: float | None = None
 
     def heliocentric(self, jd: float) -> Vec:
         """Equatorial J2000 position in au."""
@@ -127,10 +131,25 @@ class Orbit:
         ce, se = math.cos(OBLIQUITY), math.sin(OBLIQUITY)
         return xe, ye * ce - ze * se, ye * se + ze * ce
 
-    def predicted_magnitude(self, r: float, delta: float) -> float | None:
+    def predicted_magnitude(self, r: float, delta: float, phase_deg: float | None = None) -> float | None:
+        if self.h is not None and phase_deg is not None:
+            return hg_magnitude(self.h, self.g if self.g is not None else 0.15, r, delta, phase_deg)
         if self.m1 is None or self.k1 is None:
             return None
         return self.m1 + 5 * math.log10(delta) + self.k1 * math.log10(r)
+
+
+def hg_magnitude(h: float, g: float, r: float, delta: float, phase_deg: float) -> float:
+    """Asteroid V magnitude from the IAU H, G system (Bowell et al. 1989)."""
+    t = math.tan(math.radians(phase_deg) / 2)
+    phi1 = math.exp(-3.33 * t**0.63)
+    phi2 = math.exp(-1.87 * t**1.22)
+    return h + 5 * math.log10(r * delta) - 2.5 * math.log10((1 - g) * phi1 + g * phi2)
+
+
+def phase_angle(helio: Vec, geo: Vec) -> float:
+    """Sun-object-Earth angle in degrees, from the object's heliocentric and geocentric vectors."""
+    return _angle(helio, geo)
 
 
 def earth_heliocentric(when: datetime) -> Vec:
@@ -344,18 +363,29 @@ async def comet_detail(name: str, loc: Location | None, day: Any, days: int) -> 
         start = trend_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         stop = start + timedelta(hours=1)
 
+    key = _orbit_key(obj.get("prefix"), obj.get("des", ""))
+
     async def cobs_entry() -> dict[str, Any] | None:
         try:
             comets = await cobs_comets()
         except UpstreamError:
             return None
-        return cobs_summary(comets.get(_orbit_key(obj.get("prefix"), obj.get("des", ""))), datetime.now(UTC))
+        return cobs_summary(comets.get(key), datetime.now(UTC))
 
-    tonight_rows, trend_rows, cobs = await asyncio.gather(
+    async def cobs_recent() -> dict[str, Any] | None:
+        try:
+            return await recent_observations(key)
+        except UpstreamError:
+            return None
+
+    tonight_rows, trend_rows, cobs, recent = await asyncio.gather(
         horizons_ephemeris(command, loc, start, stop, "15m") if loc else asyncio.sleep(0, []),
         horizons_ephemeris(command, loc, trend_start, trend_start + timedelta(days=days), "1d"),
         cobs_entry(),
+        cobs_recent(),
     )
+    if recent:
+        cobs = {**(cobs or {}), "recent_observations": recent}
     out: dict[str, Any] = {"comet": describe_body(payload), "cobs": cobs}
     if loc and tonight_rows:
         times = [_horizons_time(r["Date__(UT)__HR:MN"]) for r in tonight_rows]
@@ -429,6 +459,42 @@ def cobs_summary(entry: dict[str, Any] | None, now: datetime) -> dict[str, Any] 
     return out
 
 
+def shape_observation(o: dict[str, Any]) -> dict[str, Any]:
+    observer = o.get("observer") or {}
+    name = " ".join(x for x in (observer.get("first_name", "")[:1] + "." if observer.get("first_name") else "",
+                                observer.get("last_name", "")) if x)
+    tail = _float(o.get("tail_length"))
+    out = {
+        "date_utc": (o.get("obs_date") or "")[:16] or None,
+        "magnitude": _float(o.get("magnitude")),
+        "method": (o.get("obs_method") or {}).get("name"),
+        "aperture_cm": _float(o.get("instrument_aperture")),
+        "instrument": (o.get("instrument_type") or {}).get("name"),
+        "coma_arcmin": _float(o.get("coma_diameter")),
+        "degree_of_condensation": o.get("coma_dc"),
+        "tail": f"{tail:g} {o.get('tail_length_unit') or ''}".strip() if tail else None,
+        "observer": f"{name} ({observer['country']})" if name and observer.get("country") else name or None,
+    }
+    return _drop_none(out)
+
+
+async def recent_observations(key: str, days: int = 30, count: int = 8) -> dict[str, Any] | None:
+    """The latest COBS brightness reports for a comet, and their median over the last week."""
+    since = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
+    payload = await get_json(COBS_OBS, {"des": key, "format": "json", "from_date": since, "length": 60},
+                             source="COBS", ttl=3600)
+    rows = [o for o in payload.get("objects", []) if _float(o.get("magnitude")) is not None]
+    if not rows:
+        return None
+    week_ago = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%d")
+    week = sorted(float(o["magnitude"]) for o in rows if (o.get("obs_date") or "") >= week_ago)
+    return _drop_none({
+        "count_last_30_days": payload.get("info", {}).get("recordsTotal", len(rows)),
+        "median_magnitude_last_7_days": round(median(week), 1) if week else None,
+        "latest": [shape_observation(o) for o in rows[:count]],
+    })
+
+
 def equipment_for(magnitude: float) -> str:
     for limit, label in COMET_EQUIPMENT:
         if magnitude <= limit:
@@ -461,12 +527,12 @@ def best_view(track: list[tuple[float, float]], times: list[datetime], sun_alts:
             "reason": "below the horizon all night" if highest < 0 else f"no higher than {round(highest)}° after dusk"}
 
 
-async def _horizons_position(orbit: Orbit, when: datetime, gate: asyncio.Semaphore) -> dict[str, Any] | None:
-    """Horizons' geocentric position for a comet at one moment, or None if Horizons fails."""
+async def _horizons_position(command: str, when: datetime, gate: asyncio.Semaphore) -> dict[str, Any] | None:
+    """Horizons' geocentric position for a body at one moment, or None if Horizons fails."""
     for attempt in range(2):  # Horizons occasionally drops one of a burst of requests
         async with gate:
             try:
-                rows = await horizons_ephemeris(comet_command(orbit.spkid), None, when, when + timedelta(minutes=1), "1m")
+                rows = await horizons_ephemeris(command, None, when, when + timedelta(minutes=1), "1m")
                 return shape_row(rows[0], None) if rows else None
             except (UpstreamError, ValueError):
                 if attempt:
@@ -514,7 +580,7 @@ async def bright_comets(loc: Location | None, day: Any, max_magnitude: float, li
     candidates = candidates[: limit * 2 + 5]
 
     gate = asyncio.Semaphore(3)  # be gentle with Horizons
-    refined = await asyncio.gather(*(_horizons_position(c[1], when, gate) for c in candidates))
+    refined = await asyncio.gather(*(_horizons_position(comet_command(c[1].spkid), when, gate) for c in candidates))
 
     found, in_glare = [], []
     for (_, orbit, geo, r, delta, observed), precise in zip(candidates, refined):
@@ -555,10 +621,28 @@ async def bright_comets(loc: Location | None, day: Any, max_magnitude: float, li
             "earth_distance_au": round(delta, 3),
             "position_source": "JPL Horizons" if precise else "two-body estimate (Horizons unavailable)",
             "cobs": observed,
+            "_key": orbit.key,
         }))
 
     found.sort(key=lambda c: c["magnitude"])
     found = found[:limit]
+
+    # Prefer what observers reported this week over the light-curve fit.
+    async def recent_or_none(key: str) -> dict[str, Any] | None:
+        async with gate:
+            try:
+                return await recent_observations(key, days=14, count=3)
+            except UpstreamError:
+                return None
+
+    recents = await asyncio.gather(*(recent_or_none(c.pop("_key")) for c in found))
+    for comet, recent in zip(found, recents):
+        if recent and recent.get("median_magnitude_last_7_days") is not None:
+            comet["magnitude"] = recent["median_magnitude_last_7_days"]
+            comet["magnitude_source"] = "COBS (median of reports in the last 7 days)"
+            comet["equipment"] = equipment_for(comet["magnitude"])
+            comet["cobs"] = {**(comet.get("cobs") or {}), "recent_observations": recent}
+    found = sorted((c for c in found if c["magnitude"] <= max_magnitude), key=lambda c: c["magnitude"])
     if loc and times:
         tracks = sky.fast_tracks([(c["ra_deg"], c["dec_deg"]) for c in found], times, loc)
         for comet, track in zip(found, tracks):
@@ -574,6 +658,121 @@ async def bright_comets(loc: Location | None, day: Any, max_magnitude: float, li
         "note": "A comet's magnitude is its total brightness spread over the coma, so it looks fainter than a "
                 "star of the same magnitude. JPL predictions are often off by 1-2 magnitudes; COBS values follow "
                 "actual observations.",
+    })
+
+
+# ---------------------------------------------------------------- bright asteroids
+
+def _asteroid_from_row(row: dict[str, Any]) -> Orbit | None:
+    try:
+        a, e = float(row["a"]), float(row["e"])
+        n = GAUSS_K / a**1.5  # radians per day
+        tp = float(row["epoch"]) - math.radians(float(row["ma"])) / n
+        return Orbit(
+            name=row["full_name"].strip(), key=row["pdes"], spkid=str(row["spkid"]), e=e, q=a * (1 - e), tp=tp,
+            node=float(row["om"]), peri=float(row["w"]), incl=float(row["i"]),
+            h=float(row["H"]), g=_float(row.get("G")),
+        )
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+async def asteroid_orbits() -> list[Orbit]:
+    """Asteroids with H brighter than 10.5, about 8,000 (SBDB, cached for a day)."""
+    fields = ("full_name", "pdes", "spkid", "e", "a", "i", "om", "w", "ma", "epoch", "H", "G")
+    payload = await get_json_file(
+        SBDB_QUERY,
+        {"fields": ",".join(fields), "sb-kind": "a", "full-prec": "true", "sb-cdata": '{"AND":["H|LT|10.5"]}'},
+        data_dir() / "asteroids" / "sbdb_bright.json",
+        source="JPL SBDB", max_age=86400, timeout=120,
+    )
+    names = payload.get("fields", fields)
+    orbits = [_asteroid_from_row(dict(zip(names, row))) for row in payload.get("data", [])]
+    return [o for o in orbits if o is not None]
+
+
+def _opposition_note(elongation: float | None) -> str | None:
+    if elongation is None:
+        return None
+    if elongation > 160:
+        return "near opposition: up all night"
+    return None
+
+
+async def bright_asteroids(loc: Location | None, day: Any, max_magnitude: float, limit: int) -> dict[str, Any]:
+    """Asteroids brighter than `max_magnitude`, brightest first, with where to find them tonight.
+
+    Same approach as the comet list: offline two-body positions from recent osculating
+    elements pick the candidates, Horizons gives the final positions and magnitudes.
+    """
+    orbits = await asteroid_orbits()
+    if loc:
+        times, sun_alts = night_samples(loc, day)
+        when = times[len(times) // 2] if times else sky.local_noon(loc, day) + timedelta(hours=12)
+    else:
+        times, sun_alts, when = [], [], datetime.now(UTC)
+    earth = earth_heliocentric(when)
+    sun_dir = (-earth[0], -earth[1], -earth[2])
+
+    candidates = []
+    for orbit in orbits:
+        geo, r, delta = geocentric(orbit, when, earth)
+        helio = (geo[0] + earth[0], geo[1] + earth[1], geo[2] + earth[2])
+        mag = orbit.predicted_magnitude(r, delta, phase_angle(helio, geo))
+        if mag is not None and mag <= max_magnitude + 0.5:
+            candidates.append((mag, orbit, geo))
+    candidates.sort(key=lambda c: c[0])
+    candidates = candidates[: limit * 2 + 5]
+
+    gate = asyncio.Semaphore(3)
+    refined = await asyncio.gather(*(_horizons_position(f"'DES={c[1].spkid};'", when, gate) for c in candidates))
+
+    found, in_glare = [], []
+    for (estimate, orbit, geo), precise in zip(candidates, refined):
+        if precise and precise.get("magnitude") is not None:
+            ra, dec, mag = precise["ra_deg"], precise["dec_deg"], precise["magnitude"]
+            elongation = precise.get("elongation_deg")
+            side = precise.get("sky")
+            rate = precise.get("motion_arcsec_per_min")
+            motion = round(rate * 1440 / 3600, 2) if rate is not None else None
+        else:
+            ra, dec = _radec(geo)
+            mag, elongation, motion = estimate, _angle(geo, sun_dir), None
+            side = "evening" if sky.wrap180(ra - _radec(sun_dir)[0]) > 0 else "morning"
+        if mag > max_magnitude:
+            continue
+        if elongation is not None and elongation < 20:
+            in_glare.append(orbit.name)
+            continue
+        found.append(_drop_none({
+            "name": orbit.name,
+            "magnitude": round(mag, 1),
+            "equipment": "binoculars" if mag <= 9 else "small telescope" if mag <= 11.5 else "telescope",
+            "constellation": sky.constellation(ra, dec)["name"],
+            "ra_deg": round(ra, 3),
+            "dec_deg": round(dec, 3),
+            "motion_deg_per_day": motion,
+            "elongation_deg": round(elongation, 1) if elongation is not None else None,
+            "sky": side,
+            "placement": _opposition_note(elongation),
+            "absolute_magnitude_H": orbit.h,
+            "position_source": "JPL Horizons" if precise else "two-body estimate (Horizons unavailable)",
+        }))
+    found.sort(key=lambda a: a["magnitude"])
+    found = found[:limit]
+    if loc and times:
+        tracks = sky.fast_tracks([(a["ra_deg"], a["dec_deg"]) for a in found], times, loc)
+        for item, track in zip(found, tracks):
+            item["tonight"] = best_view(track, times, sun_alts, loc)
+    return _drop_none({
+        "time": fmt(when, loc or Location(0.0, 0.0)),
+        "location": loc.name if loc else None,
+        "max_magnitude": max_magnitude,
+        "count": len(found),
+        "asteroids": found,
+        "too_close_to_sun": in_glare or None,
+        "note": "Asteroids look like stars; identify one by its motion against the background over an hour or "
+                "a night. get_asteroid_ephemeris gives positions for a finder chart.",
     })
 
 

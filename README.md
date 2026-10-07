@@ -20,8 +20,9 @@ No API keys are required. Every source is free and public:
 | [Launch Library 2](https://thespacedevs.com/llapi) | Upcoming rocket launches (15 requests/hour, so cached 15 min) |
 | [JPL Solar System Dynamics](https://ssd-api.jpl.nasa.gov/) | Comet and asteroid orbits and physical data (SBDB), ephemerides (Horizons), Earth close approaches (CAD) |
 | [CNEOS fireballs](https://cneos.jpl.nasa.gov/fireballs/) | Bolides detected by US government sensors |
-| [COBS](https://cobs.si/) | Observed comet brightness, fitted to observers' reports |
-| [CelesTrak](https://celestrak.org/) | Satellite orbital elements, propagated with [SGP4](https://pypi.org/project/sgp4/) (cached 2 hours, as CelesTrak asks) |
+| [COBS](https://cobs.si/) | Observed comet brightness: light-curve fits and individual observers' reports |
+| [Project Pluto](https://www.projectpluto.com/grs_lon.txt) | JUPOS measurements of the Great Red Spot's longitude (fetched weekly) |
+| [CelesTrak](https://celestrak.org/) | Satellite orbital elements, propagated with [SGP4](https://pypi.org/project/sgp4/) (cached 2 hours, as CelesTrak asks), and the satellite catalog's radar sizes for rough brightness |
 
 ## Tools
 
@@ -71,15 +72,16 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | `get_moon_phases` | Current phase and exact times of upcoming quarters and new moons |
 | `get_eclipses` | Upcoming lunar eclipses, and solar eclipses visible from your location |
 | `identify_constellation` | Which constellation an object or RA/Dec lies in |
-| `find_conjunctions` | Close pairings of planets (and optionally the Moon) over a date range, with separation and morning/evening sky |
+| `find_conjunctions` | Close pairings of planets, optionally with the Moon and bright stars (Regulus, Spica, the Pleiades...), with separation and morning/evening sky |
 | `find_oppositions` | Oppositions of Mars through Neptune: date, brightness, apparent size, closest approach to Earth |
+| `find_greatest_elongations` | Mercury's and Venus's best evening and morning showings, with altitude at twilight |
 
 **Jupiter and the Moon up close**
 
 | Tool | What it does |
 | --- | --- |
 | `get_jupiter_moons` | Where the four Galilean moons are, which are hidden or in transit, central meridian and Great Red Spot position |
-| `get_jupiter_events` | Upcoming moon transits, shadow transits, occultations, eclipses and Red Spot transits, flagged for your sky |
+| `get_jupiter_events` | Upcoming moon transits, shadow transits, occultations, eclipses, Red Spot transits and (in season) moons occulting and eclipsing each other, flagged for your sky |
 | `get_lunar_terminator` | Named craters, mountains and rilles in low sunlight on the terminator, with the Sun's height at each |
 | `get_moon_libration` | Libration angles, the favoured limb, and which limb features (Mare Orientale, Bailly, polar craters) are well placed |
 
@@ -87,7 +89,8 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 
 | Tool | What it does |
 | --- | --- |
-| `get_comet_visibility` | Comets bright enough to see now, with where and when tonight; or one comet's view tonight and its brightness trend |
+| `get_comet_visibility` | Comets bright enough to see now, with where and when tonight; or one comet's view tonight, its brightness trend and the latest observers' reports |
+| `find_bright_asteroids` | Asteroids bright enough for binoculars or a small telescope, with where and when tonight |
 | `get_asteroid_ephemeris` | Position, brightness, motion and altitude over time for any asteroid or comet, plus its size and orbit class |
 | `find_close_approaches` | Asteroids and comets passing near Earth: time, distance in lunar distances, speed, size |
 | `get_fireball_reports` | Recent large bolides: time, place, energy, and whether one was above your horizon |
@@ -99,7 +102,8 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | `get_iss_passes` | Visible ISS passes: where it appears, peaks and vanishes, to the second, with brightness |
 | `get_satellite_passes` | The same for any satellite by name or NORAD number, optionally including passes you can't see |
 | `find_satellites_overhead` | What's up right now, where each satellite is heading, and when it leaves view |
-| `get_starlink_trains` | Recent Starlink batches, how stretched out each train is, and when it passes over |
+| `get_starlink_trains` | Recent Starlink batches (including ones not yet named in the catalog), how stretched out each train is, and when it passes over |
+| `predict_iss_transit` | The ISS crossing the Sun or Moon: the nearest point on the centerline, path width, time to the millisecond |
 
 **Catalogs**
 
@@ -193,7 +197,7 @@ Layout of `src/astronomy_mcp/`:
 - `visibility.py`: the detection-threshold model (calibrated in `tests/test_visibility.py`).
 - `conditions.py`: sky-brightness and moonlight model, limiting magnitude, weather forecast.
 - `airquality.py`: aerosol optical depth, dust and fine particles, and what they do to transparency.
-- `jupiter.py`: Galilean moon geometry seen from Earth and from the Sun, event search, central meridian and Great Red Spot. `GRS_LONGITUDE` there needs a yearly update.
+- `jupiter.py`: Galilean moon geometry seen from Earth and from the Sun, event search, central meridian, Great Red Spot (built-in value plus Project Pluto's JUPOS table) and mutual events.
 - `lunar.py`: the Moon's orientation (libration, subsolar point), the terminator, and the USGS feature gazetteer.
 - `almanac.py`: conjunctions and oppositions.
 - `smallbodies.py`: two-body comet orbits, the bright-comet list (COBS brightness, Horizons positions), Horizons ephemerides, close approaches and fireballs.
@@ -215,4 +219,6 @@ Service notes:
 - CelesTrak blocks clients that download the same file more than once every two hours, so satellite elements are cached on disk for two hours, and a stale copy is used if a refresh fails.
 - Horizons accepts `DES=<SPK-ID>;` for both comets and asteroids, but a bare SPK-ID fails for most asteroids, so names are resolved with SBDB first. Comets add `CAP;NOFRAG` to get the current apparition.
 - SBDB's elements for a periodic comet can be from an earlier apparition (10P's are from 2015), so two-body positions can be degrees off. The bright-comet list uses them only to pick candidates.
+- JUPOS itself only publishes the Red Spot's longitude as a chart image, so the measurements come from Project Pluto's `grs_lon.txt`. The newer of that table's last point and the built-in value wins.
+- Sources looked at and not used: the American Meteor Society's fireball data (the public viewer's data files are deliberately obfuscated, and the keyed API was down), and Mini-MegaTORTORA's satellite magnitudes (its `robots.txt` disallows automated access).
 - Public Overpass servers are often overloaded. `find_dark_sites` asks several mirrors at once and still returns sites, flagged as unchecked for access, if none answer.

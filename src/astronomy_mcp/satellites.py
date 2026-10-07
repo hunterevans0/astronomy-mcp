@@ -15,6 +15,8 @@ predicted.
 
 from __future__ import annotations
 
+import csv
+import io
 import math
 import re
 from dataclasses import dataclass
@@ -28,11 +30,14 @@ from sgp4.api import Satrec
 from sgp4.propagation import gstime
 
 from astronomy_mcp import sky
-from astronomy_mcp.http import UpstreamError, get_json_file
+from astronomy_mcp.http import UpstreamError, get_json, get_json_file, get_text_file
 from astronomy_mcp.location import Location, data_dir
 from astronomy_mcp.sky import Vec
 
 CELESTRAK = "https://celestrak.org/NORAD/elements/gp.php"
+SATCAT_CSV = "https://celestrak.org/pub/satcat.csv"
+LL2_PREVIOUS = "https://ll.thespacedevs.com/2.3.0/launches/previous/"
+RCS_MAGNITUDE_ZERO_POINT = 5.0
 GROUPS = ("visual", "stations", "starlink", "active")
 CACHE_SECONDS = 2 * 3600
 
@@ -65,6 +70,7 @@ class Satellite:
     mean_motion: float  # revolutions per day
     revolutions_at_epoch: int
     standard_magnitude: float | None
+    magnitude_basis: str | None = None
 
     @property
     def period_min(self) -> float:
@@ -80,28 +86,67 @@ class Satellite:
             "name": self.name, "norad_id": self.norad_id, "international_designator": self.intl_designator,
             "elements_epoch_utc": self.epoch.isoformat(timespec="minutes"),
             "mean_altitude_km": round(self.altitude_km), "period_min": round(self.period_min, 1),
-            "standard_magnitude": self.standard_magnitude,
+            "standard_magnitude": round(self.standard_magnitude, 1) if self.standard_magnitude is not None else None,
+            "standard_magnitude_basis": self.magnitude_basis,
         }
 
 
-def default_standard_magnitude(norad_id: int, name: str) -> float | None:
+def default_standard_magnitude(norad_id: int, name: str) -> tuple[float | None, str | None]:
     if norad_id in STANDARD_MAGNITUDE:
-        return STANDARD_MAGNITUDE[norad_id]
+        return STANDARD_MAGNITUDE[norad_id], "built-in estimate (±1)"
     if name.upper().startswith("STARLINK"):
-        return STARLINK_STANDARD_MAGNITUDE
-    return None
+        return STARLINK_STANDARD_MAGNITUDE, "built-in Starlink estimate (±1)"
+    return None, None
 
 
-def satellite_from_omm(fields: dict[str, Any], standard_magnitude: float | None = None) -> Satellite:
+def magnitude_from_rcs(rcs_m2: float) -> float:
+    """Very rough standard magnitude from radar cross-section. Radar and optical size differ, so
+    expect ±1.5 magnitudes; calibrated so the ISS, Hubble and SL-16 rocket bodies come out near
+    their observed brightness."""
+    return RCS_MAGNITUDE_ZERO_POINT - 2.5 * math.log10(rcs_m2)
+
+
+def satellite_from_omm(fields: dict[str, Any], standard_magnitude: float | None = None,
+                       rcs: dict[int, float] | None = None) -> Satellite:
     rec = Satrec()
     omm.initialize(rec, fields)
     norad, name = int(fields["NORAD_CAT_ID"]), fields.get("OBJECT_NAME", "").strip()
+    if standard_magnitude is not None:
+        mag, basis = standard_magnitude, "given by user"
+    else:
+        mag, basis = default_standard_magnitude(norad, name)
+        if mag is None and rcs and rcs.get(norad):
+            mag, basis = magnitude_from_rcs(rcs[norad]), "rough estimate from radar cross-section (±1.5)"
     return Satellite(
         name=name, norad_id=norad, intl_designator=fields.get("OBJECT_ID", ""), rec=rec,
         epoch=datetime.fromisoformat(fields["EPOCH"]).replace(tzinfo=UTC),
         mean_motion=float(fields["MEAN_MOTION"]), revolutions_at_epoch=int(fields.get("REV_AT_EPOCH") or 0),
-        standard_magnitude=standard_magnitude if standard_magnitude is not None else default_standard_magnitude(norad, name),
+        standard_magnitude=mag, magnitude_basis=basis,
     )
+
+
+_rcs: dict[int, float] | None = None
+
+
+async def rcs_table() -> dict[int, float]:
+    """NORAD id to radar cross-section (m²) from CelesTrak's SATCAT, refreshed weekly. Empty if unavailable."""
+    global _rcs
+    if _rcs is None:
+        try:
+            text = await get_text_file(SATCAT_CSV, data_dir() / "celestrak" / "satcat.csv", source="CelesTrak SATCAT",
+                                       max_age=7 * 86400)
+        except UpstreamError:
+            return {}
+        table = {}
+        for row in csv.DictReader(io.StringIO(text)):
+            try:
+                value = float(row.get("RCS") or 0)
+                if value > 0:
+                    table[int(row["NORAD_CAT_ID"])] = value
+            except (TypeError, ValueError, KeyError):
+                continue
+        _rcs = table
+    return _rcs
 
 
 async def _celestrak(params: dict[str, str], cache_name: str) -> list[dict[str, Any]]:
@@ -118,7 +163,9 @@ async def _celestrak(params: dict[str, str], cache_name: str) -> list[dict[str, 
 async def group(name: str) -> list[Satellite]:
     if name not in GROUPS and name != "last-30-days":
         raise ValueError(f"Unknown satellite group '{name}'; choose from {', '.join(GROUPS)}.")
-    return [satellite_from_omm(r) for r in await _celestrak({"GROUP": name}, f"group-{name}")]
+    records = await _celestrak({"GROUP": name}, f"group-{name}")
+    rcs = await rcs_table()
+    return [satellite_from_omm(r, rcs=rcs) for r in records]
 
 
 async def find_satellite(query: str, standard_magnitude: float | None = None) -> Satellite:
@@ -129,14 +176,14 @@ async def find_satellite(query: str, standard_magnitude: float | None = None) ->
         records = await _celestrak({"CATNR": str(norad)}, f"catnr-{norad}")
         if not records:
             raise ValueError(f"CelesTrak has no current orbit for NORAD {norad} (it may have decayed).")
-        return satellite_from_omm(records[0], standard_magnitude)
+        return satellite_from_omm(records[0], standard_magnitude, await rcs_table())
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     records = await _celestrak({"NAME": text}, f"name-{slug}")
     if not records:
         raise ValueError(f"CelesTrak has no satellite named like '{query}'. Try its NORAD catalog number.")
     exact = [r for r in records if r.get("OBJECT_NAME", "").strip().lower() == text.lower()]
     if len(exact) == 1 or len(records) == 1:
-        return satellite_from_omm((exact or records)[0], standard_magnitude)
+        return satellite_from_omm((exact or records)[0], standard_magnitude, await rcs_table())
     options = "; ".join(f"{r['OBJECT_NAME'].strip()} ({r['NORAD_CAT_ID']})" for r in records[:12])
     raise ValueError(f"Several satellites match '{query}': {options}. Pass the NORAD number.")
 
@@ -409,6 +456,7 @@ def overhead(sats: list[Satellite], loc: Location, when: datetime, min_alt: floa
             "sunlit": lk.sunlit,
             "visible": lk.visible,
             "magnitude": round(lk.magnitude, 1) if lk.magnitude is not None else None,
+            "magnitude_rough": True if lk.magnitude is not None and (sat.magnitude_basis or "").startswith("rough") else None,
             "heading_toward": sky.compass(leave.azimuth) if leave else None,
             "leaves_view": ("fades into shadow" if leave and leave.altitude >= min_alt else "sets") if leave else None,
             "minutes_left_in_view": round((leave.when - when).total_seconds() / 60, 1) if leave else None,
@@ -451,17 +499,20 @@ def train_spread(sats: list[Satellite], when: datetime) -> tuple[Satellite, floa
 
 async def starlink_trains(loc: Location, start: datetime, days: float, max_age_days: float,
                           min_alt: float) -> dict[str, Any]:
+    launches, ll2_error = await starlink_launches()
     recent = [r for r in await _celestrak({"GROUP": "last-30-days"}, "group-last-30-days")
-              if r.get("OBJECT_NAME", "").upper().startswith("STARLINK")]
+              if r.get("OBJECT_NAME", "").upper().startswith("STARLINK") or r.get("OBJECT_ID", "")[:8] in launches]
     batches: dict[str, list[Satellite]] = {}
     for r in recent:
-        batches.setdefault(r.get("OBJECT_ID", "")[:8], []).append(satellite_from_omm(r))
+        batches.setdefault(r.get("OBJECT_ID", "")[:8], []).append(
+            satellite_from_omm(r, STARLINK_STANDARD_MAGNITUDE))
     now = datetime.now(UTC)
     trains = []
     for launch_id, sats in sorted(batches.items()):
         if len(sats) < 3:
             continue
-        launched = launch_date(sats)
+        mission, net = launches.get(launch_id, (None, None))
+        launched = net or launch_date(sats)
         age = (now - launched).total_seconds() / 86400
         if age > max_age_days:
             continue
@@ -474,7 +525,10 @@ async def starlink_trains(loc: Location, start: datetime, days: float, max_age_d
         altitude = median(s.altitude_km for s in sats)
         train: dict[str, Any] = {
             "launch": launch_id,
-            "launched_about": launched.date().isoformat(),
+            "mission": mission,
+            "launched": launched.isoformat(timespec="minutes") if net else None,
+            "launched_about": None if net else launched.date().isoformat(),
+            "unnamed_in_catalog": sum(1 for s in sats if not s.name.upper().startswith("STARLINK")) or None,
             "satellites": len(sats),
             "median_altitude_km": round(altitude),
             "train_length_minutes": round(spread_min, 1),
@@ -490,8 +544,8 @@ async def starlink_trains(loc: Location, start: datetime, days: float, max_age_d
                 p["train_last_at"] = (peak - timedelta(minutes=trail_deg / 360 * period)).isoformat(timespec="seconds")
                 found.append(p)
             train["visible_passes"] = found
-        trains.append(train)
-    return {
+        trains.append({k: v for k, v in train.items() if v is not None})
+    out = {
         "location": loc.name,
         "from": sky.fmt(start, loc),
         "days": days,
@@ -500,5 +554,235 @@ async def starlink_trains(loc: Location, start: datetime, days: float, max_age_d
         "note": "Trains are brightest and tightest in the first days after launch, below about 350 km, and "
                 "spread out and fade as they climb to their working orbit. Pass times are for the middle "
                 "satellite; train_first_at and train_last_at bracket the line. Brightness varies with each "
-                "satellite's attitude, and newly launched satellites CelesTrak hasn't named yet are missed.",
+                "satellite's attitude. Batches are found by name and by matching Launch Library's Starlink "
+                "launches, so ones CelesTrak hasn't named yet are included; a launch only appears once "
+                "CelesTrak has orbits for it, usually within a day.",
+        "launch_library_unavailable": ll2_error,
     }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+async def starlink_launches() -> tuple[dict[str, tuple[str, datetime]], str | None]:
+    """Recent Starlink launches from Launch Library 2: {COSPAR launch id: (mission name, launch time)}."""
+    try:
+        payload = await get_json(LL2_PREVIOUS, {"search": "Starlink", "limit": 20, "mode": "normal"},
+                                 source="Launch Library 2", ttl=3600)
+    except UpstreamError as exc:
+        return {}, str(exc)
+    out = {}
+    for r in payload.get("results", []):
+        designator = r.get("launch_designator")
+        if designator and r.get("net") and (r.get("status") or {}).get("abbrev") == "Success":
+            out[designator] = (r.get("name", ""), datetime.fromisoformat(r["net"].replace("Z", "+00:00")))
+    return out, None
+
+
+# ---------------------------------------------------------------- transits of the Sun and Moon
+
+BODY_RADIUS_KM = {"Sun": 695_700.0, "Moon": 1737.4}
+SATELLITE_SPAN_M = {25544: 109.0, 48274: 55.0}  # longest dimension, for the apparent size
+
+
+def body_vector_teme(body: str, when: datetime) -> Vec:
+    """Geocentric position of the Sun or Moon in km, equator and equinox of date."""
+    t = sky.to_time(when)
+    v = ae.GeoMoon(t) if body == "Moon" else ae.GeoVector(ae.Body.Sun, t, True)
+    v = ae.RotateVector(ae.Rotation_EQJ_EQD(t), v)
+    return v.x * sky.AU_KM, v.y * sky.AU_KM, v.z * sky.AU_KM
+
+
+def _sub(a: Vec, b: Vec) -> Vec:
+    return a[0] - b[0], a[1] - b[1], a[2] - b[2]
+
+
+def _angle_deg(a: Vec, b: Vec) -> float:
+    c = sky.cross(a, b)
+    return math.degrees(math.atan2(math.sqrt(sky.dot(c, c)), sky.dot(a, b)))
+
+
+def centerline_point(sat: Vec, body: Vec, radius_km: float) -> Vec | None:
+    """Where the line from the body's centre through the satellite meets a sphere of `radius_km`:
+    the spot on the ground that sees the satellite exactly in front of the body's centre."""
+    w = sky.unit(_sub(sat, body))
+    sw = sky.dot(sat, w)
+    disc = sw * sw - (sky.dot(sat, sat) - radius_km**2)
+    if disc < 0:
+        return None
+    t = -sw - math.sqrt(disc)
+    if t <= 0:
+        return None
+    return sat[0] + t * w[0], sat[1] + t * w[1], sat[2] + t * w[2]
+
+
+def _geodetic(p: Vec) -> tuple[float, float]:
+    lat = math.degrees(math.atan2(p[2], math.hypot(p[0], p[1]) * (1 - WGS84_E2)))
+    return lat, math.degrees(math.atan2(p[1], p[0]))
+
+
+def _bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    p1, p2, dl = math.radians(lat1), math.radians(lat2), math.radians(lon2 - lon1)
+    y = math.sin(dl) * math.cos(p2)
+    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return math.degrees(math.atan2(y, x)) % 360
+
+
+class TransitGeometry:
+    """Satellite and Sun/Moon positions over one pass, Earth-fixed, with the body interpolated."""
+
+    def __init__(self, sat: Satellite, body: str, start: datetime, end: datetime):
+        self.sat, self.body, self.start, self.span = sat, body, start, (end - start).total_seconds()
+        self.b0, self.b1 = body_vector_teme(body, start), body_vector_teme(body, end)
+
+    def at(self, when: datetime) -> tuple[Vec, Vec] | None:
+        """(satellite, body) in km, Earth-fixed."""
+        jd, fr = _julian(when)
+        err, r, _ = self.sat.rec.sgp4(jd, fr)
+        if err:
+            return None
+        f = (when - self.start).total_seconds() / self.span if self.span else 0.0
+        b = tuple(self.b0[k] + (self.b1[k] - self.b0[k]) * f for k in range(3))
+        g = gstime(jd + fr)
+        return _rotate_z(r, g), _rotate_z(b, g)  # type: ignore[arg-type]
+
+    def separation(self, when: datetime, site: Vec) -> tuple[float, float]:
+        """(angle between satellite and body centre, body's angular radius), degrees, seen from `site`."""
+        got = self.at(when)
+        if got is None:
+            return 180.0, 0.0
+        s, b = got
+        to_body = _sub(b, site)
+        radius = math.degrees(math.asin(BODY_RADIUS_KM[self.body] / math.sqrt(sky.dot(to_body, to_body))))
+        return _angle_deg(_sub(s, site), to_body), radius
+
+
+def _minimise_time(f: Any, lo: datetime, hi: datetime, tolerance_s: float = 0.002) -> datetime:
+    golden = (math.sqrt(5) - 1) / 2
+    a, b = hi - (hi - lo) * golden, lo + (hi - lo) * golden
+    fa, fb = f(a), f(b)
+    while (hi - lo).total_seconds() > tolerance_s:
+        if fa < fb:
+            hi, b, fb = b, a, fa
+            a = hi - (hi - lo) * golden
+            fa = f(a)
+        else:
+            lo, a, fa = a, b, fb
+            b = lo + (hi - lo) * golden
+            fb = f(b)
+    return lo + (hi - lo) / 2
+
+
+def _crossing_seconds(geo: TransitGeometry, site: Vec, peak: datetime) -> float:
+    """How long the satellite is in front of the disk as seen from `site` (0 if it misses)."""
+    def inside(t: datetime) -> bool:
+        sep, radius = geo.separation(t, site)
+        return sep < radius
+
+    if not inside(peak):
+        return 0.0
+    edges = []
+    for direction in (-1, 1):
+        lo, hi = peak, peak + timedelta(seconds=direction * 10)
+        for _ in range(40):
+            mid = lo + (hi - lo) / 2
+            lo, hi = (mid, hi) if inside(mid) else (lo, mid)
+        edges.append(lo)
+    return abs((edges[1] - edges[0]).total_seconds())
+
+
+def find_transits(sat: Satellite, loc: Location, start: datetime, days: float, max_distance_km: float,
+                  bodies: tuple[str, ...], min_body_altitude: float) -> list[dict[str, Any]]:
+    """Passes in which the satellite crosses the Sun or Moon as seen from within `max_distance_km`."""
+    obs = Observer(loc)
+    # Project onto a sphere through the observer: at the observer's own height, since a 1 km height
+    # difference moves the line by 1 km / tan(altitude) toward the body.
+    radius = math.sqrt(sky.dot(obs.pos, obs.pos))
+    found = []
+    for rise, set_ in _horizon_passes(obs, sat, start, start + timedelta(days=days), max(0.0, min_body_altitude - 5)):
+        for body in bodies:
+            mid = rise + (set_ - rise) / 2
+            body_alt = sky.horizontal(sky.Target(body, ae.Body.Sun if body == "Sun" else ae.Body.Moon), mid, loc)["altitude_deg"]
+            if body_alt < min_body_altitude - 2:
+                continue
+            geo = TransitGeometry(sat, body, rise, set_)
+
+            def ground_distance(t: datetime) -> float:
+                got = geo.at(t)
+                p = centerline_point(*got, radius) if got else None
+                return math.radians(_angle_deg(p, obs.pos)) * radius if p else math.inf
+
+            steps = int((set_ - rise).total_seconds())
+            samples = [(ground_distance(rise + timedelta(seconds=k)), k) for k in range(steps + 1)]
+            best, k = min(samples)
+            if best > max_distance_km * 3:
+                continue
+            peak = _minimise_time(ground_distance, rise + timedelta(seconds=max(0, k - 1)), rise + timedelta(seconds=min(steps, k + 1)))
+            distance = ground_distance(peak)
+            if distance > max_distance_km:
+                continue
+            event = describe_transit(geo, obs, radius, peak, distance, loc)
+            if event["body_altitude_deg"] >= min_body_altitude:
+                found.append(event)
+    found.sort(key=lambda e: e["time"])
+    return found
+
+
+def describe_transit(geo: TransitGeometry, obs: Observer, radius: float, peak: datetime, distance: float,
+                     loc: Location) -> dict[str, Any]:
+    s, b = geo.at(peak)  # type: ignore[misc]
+    p = centerline_point(s, b, radius)
+    lat, lon = _geodetic(p)  # type: ignore[arg-type]
+    here_peak = _minimise_time(lambda t: geo.separation(t, obs.pos)[0], peak - timedelta(seconds=60), peak + timedelta(seconds=60))
+    sep_here, body_radius = geo.separation(here_peak, obs.pos)
+    on_line = _crossing_seconds(geo, p, peak)  # type: ignore[arg-type]
+    here = _crossing_seconds(geo, obs.pos, here_peak)
+
+    # Path width: how far off the centreline the satellite still touches the disk, by sampling a point 2 km off it.
+    ahead, behind = geo.at(peak + timedelta(seconds=0.5)), geo.at(peak - timedelta(seconds=0.5))
+    width = None
+    if ahead and behind:
+        along = _sub(centerline_point(*ahead, radius), centerline_point(*behind, radius))  # type: ignore[arg-type]
+        across = sky.unit(sky.cross(sky.unit(p), along))  # type: ignore[arg-type]
+        q = sky.unit(tuple(p[k] + 2.0 * across[k] for k in range(3)))  # type: ignore[index]
+        q = (q[0] * radius, q[1] * radius, q[2] * radius)
+        miss = min(geo.separation(peak + timedelta(seconds=dt / 10), q)[0] for dt in range(-30, 31))
+        if miss > 0:
+            width = 2 * 2.0 * body_radius / miss
+
+    look = Observer(loc).look(geo.sat, peak)
+    body_target = sky.Target(geo.body, ae.Body.Sun if geo.body == "Sun" else ae.Body.Moon)
+    h = sky.horizontal(body_target, peak, loc)
+    span = SATELLITE_SPAN_M.get(geo.sat.norad_id)
+    out: dict[str, Any] = {
+        "body": geo.body,
+        "time": peak.astimezone(loc.tz).isoformat(timespec="milliseconds"),
+        "body_altitude_deg": round(h["altitude_deg"], 1),
+        "body_direction": sky.compass(h["azimuth_deg"]),
+        "body_diameter_arcmin": round(2 * body_radius * 60, 1),
+        "satellite_range_km": round(look.range_km) if look else None,
+        "satellite_size_arcsec": round(span / (look.range_km * 1000) * 206265, 1) if span and look else None,
+        "crossing_seconds_on_centerline": round(on_line, 2),
+        "path_width_km": round(width, 1) if width else None,
+        "centerline_nearest_you": {
+            "distance_km": round(distance, 1),
+            "direction": sky.compass(_bearing(loc.latitude, loc.longitude, lat, lon)) if distance > 0.05 else "here",
+            "latitude": round(lat, 4),
+            "longitude": round(lon, 4),
+        },
+        "from_your_location": {
+            "transits": here > 0,
+            "closest_approach_arcmin": round(sep_here * 60, 2),
+            "disk_radius_arcmin": round(body_radius * 60, 2),
+            "crossing_seconds": round(here, 2) if here else None,
+            "time": here_peak.astimezone(loc.tz).isoformat(timespec="milliseconds"),
+        },
+    }
+    if geo.body == "Moon":
+        out["moon_illuminated_percent"] = sky.moon_phase(peak)["illuminated_percent"]
+        sun_alt = sky.sun_altitude(peak, loc)
+        out["sun_altitude_deg"] = round(sun_alt, 1)
+        if sun_alt > -6:
+            out["note"] = "Daytime or twilight Moon: the satellite is a dark silhouette on a faint Moon, hard to record."
+    else:
+        out["safety"] = "Solar transit: use a certified solar filter on the telescope and camera."
+    out["from_your_location"] = {k: v for k, v in out["from_your_location"].items() if v is not None}
+    return {k: v for k, v in out.items() if v is not None}

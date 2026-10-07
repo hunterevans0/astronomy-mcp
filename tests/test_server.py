@@ -14,7 +14,7 @@ EXPECTED_TOOLS = {
     "geocode_location", "set_default_location", "get_default_location",
     # sky math
     "get_position", "get_rise_set_transit", "get_twilight_times", "get_moon_phases", "get_planet_positions",
-    "get_eclipses", "find_conjunctions", "find_oppositions",
+    "get_eclipses", "find_conjunctions", "find_oppositions", "find_greatest_elongations",
     # solar system detail
     "get_jupiter_moons", "get_jupiter_events", "get_lunar_terminator", "get_moon_libration",
     # planning and conditions
@@ -22,9 +22,10 @@ EXPECTED_TOOLS = {
     "get_light_pollution", "find_dark_sites", "get_horizon_profile",
     "get_transparency_drivers", "best_night_this_month", "find_dark_moon_weekends",
     # comets, asteroids, fireballs
-    "get_comet_visibility", "get_asteroid_ephemeris", "find_close_approaches", "get_fireball_reports",
+    "get_comet_visibility", "find_bright_asteroids", "get_asteroid_ephemeris", "find_close_approaches",
+    "get_fireball_reports",
     # satellites
-    "get_iss_passes", "get_satellite_passes", "find_satellites_overhead", "get_starlink_trains",
+    "get_iss_passes", "get_satellite_passes", "find_satellites_overhead", "get_starlink_trains", "predict_iss_transit",
     # space
     "get_space_weather", "get_upcoming_launches",
 }

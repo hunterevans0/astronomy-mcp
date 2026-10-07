@@ -111,5 +111,25 @@ async def get_json_file(
     return data
 
 
+async def get_text_file(url: str, path: Path, *, source: str, max_age: float, timeout: float = 120) -> str:
+    """Like get_json_file, for a plain-text document (CSV, fixed-width tables)."""
+    try:
+        fresh = time.time() - path.stat().st_mtime < max_age
+        cached: str | None = path.read_text(encoding="utf-8")
+    except OSError:
+        fresh, cached = False, None
+    if fresh and cached is not None:
+        return cached
+    try:
+        text = (await _fetch(url, None, source, timeout)).text
+    except UpstreamError:
+        if cached is not None:
+            return cached
+        raise
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return text
+
+
 def clear_cache() -> None:
     _cache.clear()

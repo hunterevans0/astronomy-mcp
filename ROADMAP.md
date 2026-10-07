@@ -1,6 +1,6 @@
 # Roadmap
 
-What's built (M1 to M3, half of M4) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
+What's built (M1 to M3, most of M4) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
 
 ## M1: tonight's sky (done)
 
@@ -24,24 +24,27 @@ Gaps found in M1, now closed:
 
 ## M3: solar system depth (done)
 
-- ✅ `get_jupiter_moons`, `get_jupiter_events`: Galilean moon positions, transits, shadow transits, occultations, eclipses and GRS transit times (offline). Event times are for the moon's centre, good to a few minutes. The Red Spot's longitude is a constant with a drift rate in `jupiter.py` (91° on 2026-06-01, +1.75°/month, from Sky & Telescope / JUPOS) and needs a yearly update; tools take an override.
-  - Still open: mutual events between the moons, and fetching the Red Spot's longitude from JUPOS.
+- ✅ `get_jupiter_moons`, `get_jupiter_events`: Galilean moon positions, transits, shadow transits, occultations, eclipses and GRS transit times (offline). Event times are for the moon's centre, good to a few minutes. Tools take a Red Spot longitude override.
+  - ✅ Mutual events: moons occulting and eclipsing each other, with contact times, duration and depth. Checked against IMCCE predictions for the 2026-27 season: within about 2 minutes.
+  - ✅ Red Spot longitude: JUPOS publishes it only as a chart image, so it comes from Project Pluto's `grs_lon.txt` (JUPOS measurements), fetched weekly. Its last point (December 2025) is older than the built-in Sky & Telescope value (91° on 2026-06-01, +1.75°/month), so the built-in value is used until the table catches up.
 - ✅ `get_lunar_terminator`: named features in low sunlight on the terminator (USGS planetary nomenclature, downloaded once). Lettered satellite craters are left out.
 - ✅ `get_moon_libration`: libration angles, favoured limb, and how 45 limb features are placed and lit (offline, topocentric with a location).
 - ✅ `find_conjunctions`, `find_oppositions`: closest approaches between planets (optionally the Moon), and outer-planet oppositions with closest approach to Earth (offline).
-  - Still open: planet-star conjunctions, greatest elongations of Mercury and Venus.
+  - ✅ Planet-star and Moon-star conjunctions with 11 bright stars and clusters near the ecliptic (`include_stars`). Moon-star pairings under 1.5° are flagged as possible occultations; exact local occultation predictions are still open.
+  - ✅ `find_greatest_elongations`: Mercury and Venus, with the planet's altitude at civil twilight.
 - ✅ `get_comet_visibility`, `get_asteroid_ephemeris`: bright comets now, or one comet's view tonight and its trend, and ephemerides for any comet or asteroid (JPL SBDB and Horizons, COBS). The bright-comet list propagates every comet offline to pick candidates, then takes their positions from Horizons. Brightness is COBS's fit to observer reports where one exists within two years of perihelion, otherwise JPL's M1/K1 prediction.
-  - Still open: a list of bright asteroids (Vesta and friends near opposition), and COBS's own recent observations rather than its fitted magnitude. The MPC isn't used: SBDB and Horizons cover the same objects.
+  - ✅ `find_bright_asteroids`: the same approach for the ~8,000 asteroids with H < 10.5, with H-G magnitudes, refined by Horizons.
+  - ✅ COBS recent observations: one comet's view lists the latest reports, and the bright-comet list uses the median of the last 7 days when there is one. The MPC isn't used: SBDB and Horizons cover the same objects.
 - ✅ `find_close_approaches`, `get_fireball_reports`: NEO passes with size estimates, and bolides with distance and whether they were above the observer's horizon (JPL SBDB CAD, CNEOS).
-  - Still open: ordinary bright-meteor reports (the AMS and IMO fireball databases need keys or scraping).
+  - Still open: ordinary bright-meteor reports. The AMS site's viewer loads deliberately obfuscated data files and its keyed open API returned 503; the IMO fireball site was also down. Not worth scraping around.
 
 ## M4: satellites
 
 - ✅ `get_iss_passes`, `get_satellite_passes`: visible passes with appear, peak and vanish points and an estimated magnitude (CelesTrak GP elements, sgp4). Checked against Skyfield: positions agree to under an arcminute and rise times to about a second. Earth's shadow is a cylinder, so fade times can be off by a few seconds.
-  - Still open: standard magnitudes for more satellites. Only the ISS, Tiangong, Hubble and Starlink have built-in values, since McCants' list is no longer online; others take `standard_magnitude` from the caller.
+  - Partly done: satellites without a built-in value get a rough standard magnitude from CelesTrak's radar cross-section (±1.5 mag; RCS is missing for many newer objects). Measured values would be better: McCants' list is offline and Mini-MegaTORTORA's database disallows automated access in `robots.txt`.
 - ✅ `find_satellites_overhead`, `get_starlink_trains`: what's up now and where it's heading, and recent Starlink batches with how stretched out each train is and when it passes.
-  - Still open: batches CelesTrak hasn't named yet (the first day or so after launch) are missed; matching them to Launch Library launches would catch them.
-- `predict_iss_transit`: ISS crossing the Sun or Moon from a site.
+  - ✅ Unnamed batches are matched to Launch Library's Starlink launches by COSPAR designator, which also gives the exact launch time. A batch still only appears once CelesTrak has orbits for it.
+- ✅ `predict_iss_transit`: the ISS (or any satellite) crossing the Sun or Moon. Projects the line from the body's centre through the satellite onto the ground to get the centerline, then reports the nearest point on it, path width, crossing time to the millisecond, and what the observer's own spot sees.
 - `get_dsn_status`: which spacecraft the Deep Space Network is talking to (DSN Now XML).
 
 ## M5: stars, variables, transients, exoplanets

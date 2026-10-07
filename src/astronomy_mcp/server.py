@@ -46,7 +46,9 @@ mcp = MCPServer(
         "-> describe_object; planet positions -> get_planet_positions; Moon phases -> get_moon_phases; "
         "Jupiter's moons or Red Spot -> get_jupiter_moons, get_jupiter_events; what to look at on the "
         "Moon -> get_lunar_terminator, get_moon_libration; planets close together or at their best -> "
-        "find_conjunctions, find_oppositions; "
+        "find_conjunctions, find_oppositions; Mercury or Venus at their best -> "
+        "find_greatest_elongations; asteroids to look for -> find_bright_asteroids; ISS crossing the "
+        "Sun or Moon -> predict_iss_transit; "
         "comets -> get_comet_visibility; where an asteroid or comet is -> get_asteroid_ephemeris; "
         "asteroids passing Earth -> find_close_approaches; bolides -> get_fireball_reports; ISS "
         "sightings -> get_iss_passes; other satellites -> get_satellite_passes; 'what is that moving "
@@ -879,21 +881,45 @@ async def find_conjunctions(
         Field(description="Only pairings that involve this body"),
     ] = None,
     min_elongation_deg: Annotated[float, Field(ge=0, le=60, description="Skip pairings closer to the Sun than this; 0 keeps everything")] = 12.0,
+    include_stars: Annotated[bool, Field(description="Also pair the planets (and the Moon, if included) with bright stars and clusters near the ecliptic: Regulus, Spica, Antares, Aldebaran, Pollux, the Pleiades, the Beehive and a few more")] = False,
     latitude: LAT = None,
     longitude: LON = None,
     place: PLACE = None,
 ) -> dict[str, Any]:
-    """Upcoming close pairings of planets in the sky (and optionally the Moon with planets).
+    """Upcoming close pairings of planets in the sky (optionally with the Moon and bright stars).
 
-    Use for 'when are Venus and Jupiter close together', 'any conjunctions this year' or
-    'when is the Moon next to Saturn'. Returns the moment of closest approach, the separation,
-    which body is to the north, the constellation, and whether it is a morning or evening
-    event. Computed offline for the centre of the Earth; a location only adds local times and
-    whether the pair is up at that moment.
+    Use for 'when are Venus and Jupiter close together', 'any conjunctions this year', 'when
+    is the Moon next to Saturn' or 'when does Mars pass Regulus'. Returns the moment of
+    closest approach, the separation, which body is to the north, the constellation, and
+    whether it is a morning or evening event. Computed offline for the centre of the Earth; a
+    location only adds local times and whether the pair is up at that moment.
     """
     loc = await _location_or_none(latitude, longitude, place)
     return almanac.conjunctions(_range_start(start_date, loc), days, loc, max_separation_deg,
-                                include_moon or body == "moon", body, min_elongation_deg)
+                                include_moon or body == "moon", body, min_elongation_deg, include_stars)
+
+
+@tool(annotations=READ_ONLY)
+async def find_greatest_elongations(
+    start_date: Annotated[str | None, Field(description="First day (YYYY-MM-DD); omit for today")] = None,
+    days: Annotated[int, Field(ge=1, le=3650, description="How many days ahead to search")] = 365,
+    planets: Annotated[
+        list[Literal[almanac.INNER_PLANETS]] | None,  # type: ignore[valid-type]
+        Field(description="Mercury, Venus or both (default)"),
+    ] = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """When Mercury and Venus are farthest from the Sun in the sky: their best evening and morning showings.
+
+    Use for 'when can I see Mercury', 'when is Venus highest in the evening' or 'best Mercury
+    apparition this year'. Gives the date, elongation, morning or evening sky, magnitude and
+    phase, and with a location how high the planet stands at civil twilight, which is what
+    makes an apparition easy or hard. Computed offline.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return almanac.greatest_elongations(_range_start(start_date, loc), days, loc, planets)
 
 
 @tool(annotations=READ_ONLY)
@@ -922,7 +948,7 @@ async def find_oppositions(
 
 # ================================================================ Jupiter and the Moon up close
 
-GRS = Annotated[float | None, Field(ge=0, lt=360, description="Great Red Spot's System II longitude, if you have a current measurement; omit to use the built-in drift estimate")]
+GRS = Annotated[float | None, Field(ge=0, lt=360, description="Great Red Spot's System II longitude, if you have a current measurement; omit to use the latest JUPOS value and its drift")]
 
 
 @tool(annotations=READ_ONLY)
@@ -942,7 +968,8 @@ async def get_jupiter_moons(
     Computed offline. For upcoming transits and eclipses, use get_jupiter_events.
     """
     loc = await _location_or_none(latitude, longitude, place)
-    return jupiter.moons_now(sky.parse_time(time, loc or Location(0.0, 0.0)), loc, grs_longitude)
+    return jupiter.moons_now(sky.parse_time(time, loc or Location(0.0, 0.0)), loc, grs_longitude,
+                             await jupiter.current_grs_model())
 
 
 @tool(annotations=READ_ONLY)
@@ -950,6 +977,7 @@ async def get_jupiter_events(
     time: Annotated[str | None, Field(description="Start of the search, ISO 8601; without an offset it is the observer's local time. Omit for now.")] = None,
     hours: Annotated[float, Field(gt=0, le=240, description="How many hours ahead to search")] = 24,
     observable_only: Annotated[bool, Field(description="Keep only events with Jupiter at least 10° up in a dark sky at the location")] = False,
+    include_mutual_events: Annotated[bool, Field(description="Include moons occulting and eclipsing each other (only in seasons around Jupiter's equinoxes, such as late 2026 to mid 2027)")] = True,
     grs_longitude: GRS = None,
     latitude: LAT = None,
     longitude: LON = None,
@@ -958,14 +986,17 @@ async def get_jupiter_events(
     """Upcoming events of Jupiter's moons and Great Red Spot, in time order.
 
     Use for 'when is the next shadow transit', 'when can I see the Great Red Spot tonight' or
-    'any Io transits this week'. Lists moon transits, shadow transits, occultations and eclipses
-    (start and end) and Red Spot transits, good to a few minutes. With a location, each event
-    says whether Jupiter is up in a dark sky. Computed offline.
+    'any Io transits this week' or 'mutual events tonight'. Lists moon transits, shadow
+    transits, occultations and eclipses (start and end), Red Spot transits, and in season the
+    moons occulting and eclipsing each other, good to a few minutes. With a location, each
+    event says whether Jupiter is up in a dark sky. Computed offline; the Red Spot's longitude
+    comes from the latest JUPOS measurement available.
     """
     loc = await _location_or_none(latitude, longitude, place)
     if observable_only and loc is None:
         raise ValueError("observable_only needs a location.")
-    return jupiter.events(sky.parse_time(time, loc or Location(0.0, 0.0)), hours, loc, grs_longitude, observable_only)
+    return jupiter.events(sky.parse_time(time, loc or Location(0.0, 0.0)), hours, loc, grs_longitude, observable_only,
+                          await jupiter.current_grs_model(), include_mutual_events)
 
 
 @tool(annotations=READ_ONLY)
@@ -1042,6 +1073,27 @@ async def get_comet_visibility(
     if comet:
         return await smallbodies.comet_detail(comet, loc, day, days)
     return await smallbodies.bright_comets(loc, day, max_magnitude, limit)
+
+
+@tool(annotations=READ_ONLY)
+async def find_bright_asteroids(
+    max_magnitude: Annotated[float, Field(ge=4, le=12, description="Only asteroids at least this bright")] = 10.0,
+    limit: Annotated[int, Field(ge=1, le=30, description="Maximum asteroids")] = 10,
+    date: DATE = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Asteroids bright enough for binoculars or a small telescope now, brightest first.
+
+    Use for 'which asteroids can I see', 'is Vesta visible' or 'asteroids near opposition'.
+    Gives magnitude, constellation, how far from the Sun in the sky (near 180° means up all
+    night) and with a location the best time and altitude tonight. Positions and magnitudes
+    from JPL Horizons; for a night-by-night table use get_asteroid_ephemeris.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    day = sky.observing_date(date, loc) if loc else None
+    return await smallbodies.bright_asteroids(loc, day, max_magnitude, limit)
 
 
 @tool(annotations=READ_ONLY)
@@ -1173,7 +1225,7 @@ async def _satellite_passes(loc: Location, satellite: str, days: float, min_alti
         "passes": found,
         "note": satellites.element_age_note(sat, start, days)
                 + (" No brightness estimate: pass standard_magnitude if you know it." if sat.standard_magnitude is None else
-                   " Magnitudes are estimates (±1).")
+                   f" Magnitudes are estimates; standard magnitude basis: {sat.magnitude_basis}.")
                 + (" No visible passes in this period. A satellite shows only while sunlit against a dark sky, so "
                    "there are often a week or more without visible passes; try more days."
                    if not found and not include_daylight else ""),
@@ -1210,10 +1262,49 @@ async def find_satellites_overhead(
         "total": len(found),
         "count": min(limit, len(found)),
         "satellites": found[:limit],
-        "note": "Magnitudes are only estimated for the ISS, Tiangong, Hubble and Starlink."
+        "note": "Magnitudes for the ISS, Tiangong, Hubble and Starlink are built-in estimates (±1); others marked "
+                "magnitude_rough come from radar cross-section and can be 1.5 magnitudes off."
                 + (" The Sun is up or the sky is too bright to see satellites." if sun_alt >= satellites.SUN_LIMIT_DEG else ""),
     }
     return out
+
+
+@tool(annotations=READ_ONLY)
+async def predict_iss_transit(
+    days: PASS_DAYS = 7,
+    max_distance_km: Annotated[float, Field(gt=0, le=300, description="How far you would travel to the centerline")] = 50,
+    bodies: Annotated[list[Literal["Sun", "Moon"]] | None, Field(description="Sun, Moon or both (default)")] = None,
+    min_altitude: Annotated[float, Field(ge=0, le=80, description="Lowest Sun or Moon altitude worth considering, degrees")] = 10,
+    satellite: Annotated[str, Field(description="Satellite to check; the ISS by default, or 'Tiangong', a name or a NORAD number")] = "ISS",
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """When the ISS (or another satellite) crosses the face of the Sun or Moon near the observer.
+
+    Use for 'can I photograph the ISS crossing the Moon' or 'any ISS solar transits near me'.
+    A transit is seen only within a few kilometres of a centerline, so each event gives the
+    nearest point on that line (distance, direction, coordinates), the path width, the time to
+    the millisecond, how long the crossing lasts (about a second), and whether it transits
+    from the observer's own spot. Predictions shift by kilometres as orbits change; recheck a
+    day before. Solar transits need a proper solar filter.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    sat = await satellites.find_satellite(satellite)
+    start = datetime.now(UTC)
+    found = satellites.find_transits(sat, loc, start, days, max_distance_km, tuple(bodies or ("Sun", "Moon")), min_altitude)
+    return {
+        "satellite": {k: v for k, v in sat.info().items() if v is not None and k != "standard_magnitude_basis"},
+        "location": loc.name,
+        "from": sky.fmt(start, loc),
+        "days": days,
+        "max_distance_km": max_distance_km,
+        "count": len(found),
+        "transits": found,
+        "note": satellites.element_age_note(sat, start, days)
+                + " An orbit error of a second along the track moves the centerline by kilometres, so recheck with "
+                  "fresh elements on the day and set up close to the centerline.",
+    }
 
 
 @tool(annotations=READ_ONLY)

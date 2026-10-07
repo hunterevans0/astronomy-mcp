@@ -156,3 +156,63 @@ async def test_find_satellite_resolves_aliases_and_ambiguity(monkeypatch):
     async with Client(mcp) as client:
         result = await client.call_tool("get_satellite_passes", {"satellite": "NOAA", "latitude": 38.5733, "longitude": -109.5498})
     assert result.is_error and "Pass the NORAD number" in result.content[0].text
+
+
+def test_rough_magnitudes_from_radar_cross_section():
+    # ISS (399 m²) is about -1.8 and Hubble (28 m²) about +2; the estimate is good to ~1.5 mag.
+    assert satellites.magnitude_from_rcs(399.05) == pytest.approx(-1.8, abs=1.0)
+    assert satellites.magnitude_from_rcs(28.08) == pytest.approx(2.0, abs=1.5)
+    debris = {**ISS, "NORAD_CAT_ID": 12345, "OBJECT_NAME": "SL-16 R/B"}
+    sat = satellites.satellite_from_omm(debris, rcs={12345: 11.34})
+    assert sat.standard_magnitude == pytest.approx(2.36, abs=0.01) and sat.magnitude_basis.startswith("rough")
+    assert satellites.satellite_from_omm(debris).standard_magnitude is None
+    assert satellites.satellite_from_omm(ISS, rcs={25544: 1.0}).magnitude_basis.startswith("built-in")
+    assert satellites.satellite_from_omm(ISS, 0.5).magnitude_basis == "given by user"
+
+
+async def test_unnamed_starlink_batches_are_matched_to_launches(monkeypatch):
+    unnamed = [{**ISS, "OBJECT_NAME": f"2026-230{c}", "OBJECT_ID": f"2026-230{c}", "NORAD_CAT_ID": 99000 + k,
+                "MEAN_ANOMALY": 134.3 + k * 0.2} for k, c in enumerate("ABCD")]
+    other = [{**ISS, "OBJECT_NAME": "QIANFAN-1", "OBJECT_ID": f"2026-231{c}", "NORAD_CAT_ID": 99100 + k}
+             for k, c in enumerate("ABCD")]
+
+    async def fake_celestrak(params, cache_name):
+        return unnamed + other
+
+    async def fake_launches():
+        return {"2026-230": ("Falcon 9 Block 5 | Starlink Group 10-9", utc(2026, 10, 4, 12, 30))}, None
+
+    monkeypatch.setattr(satellites, "_celestrak", fake_celestrak)
+    monkeypatch.setattr(satellites, "starlink_launches", fake_launches)
+    monkeypatch.setattr(satellites, "datetime", type("FrozenDatetime", (datetime,), {"now": staticmethod(lambda tz=None: utc(2026, 10, 5, 13))}))
+    report = await satellites.starlink_trains(MOAB, utc(2026, 10, 5, 13), 1, 21, 10)
+    assert report["count"] == 1
+    train = report["trains"][0]
+    assert train["launch"] == "2026-230" and train["mission"].endswith("Group 10-9")
+    assert train["launched"] == "2026-10-04T12:30+00:00" and train["unnamed_in_catalog"] == 4
+    assert train["satellites"] == 4 and train["state"] == "tight train"
+
+
+def test_centerline_point_geometry():
+    # Satellite 400 km straight above a point on the x axis, body far beyond it on the same line.
+    sat = (6771.0, 0.0, 0.0)
+    assert satellites.centerline_point(sat, (1e9, 0.0, 0.0), 6371.0) == pytest.approx((6371.0, 0.0, 0.0))
+    # Body behind the Earth from the satellite: no point sees it in front.
+    assert satellites.centerline_point(sat, (-1e9, 0.0, 0.0), 6371.0) is None
+
+
+def test_transit_centerline_is_where_the_transit_is_seen(iss):
+    found = satellites.find_transits(iss, MOAB, utc(2026, 10, 6, 15), 0.25, 200, ("Moon",), 10)
+    assert len(found) == 1
+    event = found[0]
+    assert event["time"].startswith("2026-10-06T10:03:06")
+    line = event["centerline_nearest_you"]
+    assert 100 < line["distance_km"] < 130 and line["direction"] == "NW"
+    assert event["from_your_location"]["transits"] is False and event["crossing_seconds_on_centerline"] > 0.3
+    # Standing on the centerline, the same pass crosses the Moon.
+    there = Location(line["latitude"], line["longitude"], MOAB.elevation_m, MOAB.timezone)
+    again = satellites.find_transits(iss, there, utc(2026, 10, 6, 15), 0.25, 20, ("Moon",), 10)
+    assert again[0]["centerline_nearest_you"]["distance_km"] < 1
+    here = again[0]["from_your_location"]
+    assert here["transits"] is True and here["closest_approach_arcmin"] < 2 and 0.3 < here["crossing_seconds"] < 1.5
+    assert 3 < again[0]["path_width_km"] < 8
