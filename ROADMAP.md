@@ -86,3 +86,44 @@ Gaps found in M1, now closed:
 - **Resources:** the bundled catalog, saved sites and equipment, and generated charts.
 - **Prompts:** "plan tonight", "identify what I saw", "plan an imaging project".
 - **Elicitation:** ask for location or equipment mid-call instead of erroring.
+
+## Publishing
+
+The plan: publish the package to PyPI, so anyone can run it with `uvx astronomy-mcp` and nothing to clone or set up, then list it in the official MCP Registry and the main directories so people can find it. GitHub stays the source and issue tracker.
+
+Hosting it ourselves (AWS or similar) is left until there's a reason for it. The server runs locally over stdio, which suits it:
+
+- **Upstream rate limits.** One hosted instance sends every user's requests from one IP. Launch Library allows 15 requests an hour; Open-Meteo, Overpass and CelesTrak would throttle or block us too. Run locally, each user has their own allowance.
+- **State on disk.** The default location, equipment and caches (OpenNGC, USGS nomenclature, atlas tiles, terrain) live in `~/.astronomy-mcp/`. A shared server would need per-user storage and auth.
+- **Cost and upkeep.** Local is free and needs no maintenance. A hosted server costs money and has to be kept running.
+
+### Before the first release
+
+- Add a `LICENSE` (MIT or Apache-2.0) and `license` in `pyproject.toml`. Data that's downloaded at runtime keeps its own license (OpenNGC is CC-BY-SA, OSM is ODbL); the README's source table already credits them.
+- Fill in `pyproject.toml` metadata: `urls` (homepage, repository, issues), `keywords` (`mcp`, `astronomy`, `stargazing`, …) and `classifiers`. Check that `astronomy-mcp` is still free on PyPI.
+- Add a contact to `USER_AGENT` in `http.py` (e.g. `astronomy-mcp/0.3 (+https://github.com/hunterevans0/astronomy-mcp)`) and take the version from package metadata. Overpass, JPL and others ask for this, and it's polite once traffic isn't just one user.
+- Make the GitHub repo public, with a README section on installing it: config snippets for Claude Desktop, Claude Code (`claude mcp add astronomy -- uvx astronomy-mcp`), VS Code and Cursor, using `uvx` instead of the local `python -m uv run` in `.mcp.json`.
+- Install from a built wheel in a clean environment (`uv build`, then `uvx --from dist/*.whl astronomy-mcp`) to check that every data file gets packaged and that first-run downloads work with an empty cache.
+- Look at Python 3.13 as the minimum. `uvx` downloads 3.13 if needed, so it's fine, but 3.11+ would suit people who use plain `pip`.
+
+### Release to PyPI
+
+- Create the project on PyPI and set up trusted publishing from GitHub Actions, so no API tokens are stored.
+- Add a workflow that runs the tests and, on a `v*` tag, runs `uv build` and `uv publish`.
+- Keep a `CHANGELOG.md` and tag each release.
+
+### Make it discoverable
+
+- **Official MCP Registry** (registry.modelcontextprotocol.io): add `<!-- mcp-name: io.github.hunterevans0/astronomy-mcp -->` to the README (PyPI shows it, and the registry uses it to verify ownership), add a `server.json` describing the PyPI package, and publish with `mcp-publisher` using GitHub login. Clients and other directories pull from this registry. Add this step to the release workflow so each version is listed.
+- **Claude Desktop extension (`.mcpb`)**: a one-click install bundle with a manifest, attached to each GitHub release. Its manifest can ask for optional settings such as a default location. Submit it to Anthropic's extension directory once it's stable.
+- **Directories**: Smithery, Glama, PulseMCP, mcp.so, and a PR to `punkpeye/awesome-mcp-servers` (under science or other).
+- **Spread the word**: a short demo (a GIF or transcript of "what's up tonight from my backyard"), posts to r/astronomy, r/telescopes, r/ClaudeAI and Cloudy Nights, and GitHub topics on the repo.
+
+### Later: a hosted version (only if wanted)
+
+For people who can't run anything locally, such as claude.ai web users adding a remote connector:
+
+- Add a Streamable HTTP transport (`mcp.run(transport="streamable-http")`) next to stdio.
+- Make it stateless: location and equipment passed in each call or kept per user instead of in one config file, with shared caches in object storage.
+- Put a shared cache in front of rate-limited upstreams, and rate-limit per user.
+- Host on a small container service (AWS App Runner or ECS Fargate, Fly.io, Cloud Run), with OAuth if it shouldn't be open to everyone.
