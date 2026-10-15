@@ -29,6 +29,10 @@ EXPECTED_TOOLS = {
     # stars, variables, transients
     "get_double_star", "find_splittable_doubles", "get_variable_star_status", "get_light_curve",
     "get_recent_supernovae", "get_novae",
+    # exoplanets and gravitational waves
+    "get_exoplanet", "search_exoplanets", "get_transits_tonight", "get_gravitational_wave_events",
+    # astrophotography
+    "calculate_field_of_view", "frame_target", "plan_mosaic", "calculate_exposure",
     # space
     "get_space_weather", "get_upcoming_launches", "get_dsn_status",
 }

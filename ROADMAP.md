@@ -1,6 +1,6 @@
 # Roadmap
 
-What's built (M1 to M4, half of M5) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
+What's built (M1 to M5, half of M6) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
 
 ## M1: tonight's sky (done)
 
@@ -47,7 +47,7 @@ Gaps found in M1, now closed:
 - ✅ `predict_iss_transit`: the ISS (or any satellite) crossing the Sun or Moon. Projects the line from the body's centre through the satellite onto the ground to get the centerline, then reports the nearest point on it, path width, crossing time to the millisecond, and what the observer's own spot sees.
 - ✅ `get_dsn_status`: which spacecraft the Deep Space Network is talking to, with distance, light time and whether data or commands are flowing (DSN Now XML, refreshed every few seconds).
 
-## M5: stars, variables, transients, exoplanets
+## M5: stars, variables, transients, exoplanets (done)
 
 - ✅ `get_double_star`, `find_splittable_doubles`: WDS via VizieR TAP, names from SIMBAD (Bayer names like 'epsilon Lyrae' are translated). Splitting uses a rule of thumb: max(Dawes, 0.6 x seeing) x (1 + 0.3 dm), steeper past 5 magnitudes, tuned so Antares is borderline in 100 mm and Sirius B challenging.
   - Still open: binary orbits (the Sixth Orbit Catalog) for current separations of fast-moving pairs; WDS gives the last measurement.
@@ -55,13 +55,17 @@ Gaps found in M1, now closed:
   - Still open: ASAS-SN Sky Patrol. Its API (port 9006 at asassn-lb01.ifa.hawaii.edu, Arrow-format responses) did not answer, and it would need pyarrow.
 - ✅ `get_recent_supernovae`, `get_novae`: the Latest Supernovae page (curated, all active supernovae brighter than 17) and Koji Mukai's Galactic nova list, with current magnitudes from AAVSO; optional ALeRCE candidates (light-curve classes at probability >= 0.4, plus the first-image classifier at >= 0.8) and novae in M31 and other galaxies.
   - Still open: TNS, which needs registered bot credentials (could be read from environment variables), and the Fink broker, which was unreachable.
-- `get_exoplanet`, `search_exoplanets`, `get_transits_tonight`: NASA Exoplanet Archive TAP.
-- `get_gravitational_wave_events`: GWOSC / GraceDB.
+- ✅ `get_exoplanet`, `search_exoplanets`, `get_transits_tonight`: NASA Exoplanet Archive TAP (Planetary Systems Composite). Transit times are converted from BJD_TDB to UTC (light time across Earth's orbit plus TDB-UTC; within about 3 s of astropy), with the timing uncertainty propagated from the ephemeris.
+  - Still open: refined amateur ephemerides (ExoClock, the Exoplanet Transit Database), which are often fresher than the archive's.
+- ✅ `get_gravitational_wave_events`: recent significant public alerts from GraceDB with the pipeline's classification (BBH/BNS/NSBH/noise), or confirmed GWOSC events with masses, distance and SNR. Says when the detectors have been quiet (no alerts since November 2025 at the time of writing).
+  - Still open: sky maps (localisation area, and whether the region is up from the observer).
 
 ## M6: astrophotography and charts
 
-- `calculate_field_of_view`, `frame_target`, `plan_mosaic`: optics math plus catalog sizes.
-- `calculate_exposure`: NPF rule for untracked shots.
+- ✅ `calculate_field_of_view`, `frame_target`, `plan_mosaic`: field of view, image scale and sampling against seeing, eyepiece views, framing with the target's catalogued size and orientation (OpenNGC position angles), and mosaic panel coordinates. Sensor presets for common DSLR formats and ZWO cameras.
+  - Still open: a saved equipment profile (M7) so the telescope and camera needn't be repeated.
+- ✅ `calculate_exposure`: the simplified NPF rule, (35 N + 30 p) / f, with a 1/cos(declination) allowance for the aim point, and the 500 rule for comparison.
+  - Still open: the full NPF formula. Its published coefficients couldn't be confirmed, so only the simplified rule is used.
 - `plan_milky_way_shot`: galactic core position and timing.
 - `get_survey_cutout`, `generate_finder_chart`: DSS / Pan-STARRS cutouts (SkyView, hips2fits).
 - `plate_solve_image`: Astrometry.net (free key).

@@ -168,6 +168,7 @@ def _shape(row: dict[str, str]) -> dict[str, Any]:
         "surface_brightness": _float(row["SurfBr"]),
         "major_axis_arcmin": _float(row["MajAx"]),
         "minor_axis_arcmin": _float(row["MinAx"]),
+        "position_angle_deg": _float(row.get("PosAng")),  # of the major axis, east of north
         "hubble_type": row["Hubble"] or None,
         "redshift": _float(row["Redshift"]),
         "other_ids": [i.strip() for i in row["Identifiers"].split(",") if i.strip()] or None,

@@ -14,8 +14,8 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from astronomy_mcp import (
-    airquality, almanac, catalog, conditions, darksites, doubles, dsn, horizon, jupiter, lightpollution, location, lunar,
-    planner, satellites, simbad, sky, smallbodies, space, transients, variables, vsx,
+    airquality, almanac, catalog, conditions, darksites, doubles, dsn, exoplanets, gravwaves, horizon, imaging, jupiter,
+    lightpollution, location, lunar, planner, satellites, simbad, sky, smallbodies, space, transients, variables, vsx,
 )
 from astronomy_mcp.http import UpstreamError
 from astronomy_mcp.location import Location
@@ -55,7 +55,10 @@ mcp = MCPServer(
         "light' -> find_satellites_overhead; Starlink trains -> get_starlink_trains; "
         "double stars -> get_double_star, find_splittable_doubles; how a variable star is doing -> "
         "get_variable_star_status, get_light_curve; supernovae -> get_recent_supernovae; novae -> "
-        "get_novae; which spacecraft NASA is talking to -> get_dsn_status; "
+        "get_novae; which spacecraft NASA is talking to -> get_dsn_status; exoplanets -> get_exoplanet, "
+        "search_exoplanets, get_transits_tonight; gravitational waves -> get_gravitational_wave_events; "
+        "camera or eyepiece field of view -> calculate_field_of_view; will a target fit -> frame_target, "
+        "plan_mosaic; untracked exposure length -> calculate_exposure; "
         "aurora -> get_space_weather; launches -> get_upcoming_launches.\n\n"
         "Location: tools take latitude/longitude or a place name, and otherwise use the saved "
         "default. When the user says where they observe from, call set_default_location once. If no "
@@ -1486,6 +1489,259 @@ async def get_dsn_status(
     or commands are flowing. Live from DSN Now; contacts change every few hours.
     """
     return await dsn.status(spacecraft, include_antennas)
+
+
+# ================================================================ exoplanets and gravitational waves
+
+@tool(annotations=READ_ONLY)
+async def get_exoplanet(
+    name: Annotated[str, Field(description="Planet name ('TRAPPIST-1 e', 'HD 189733 b') or host star name to list its planets ('TRAPPIST-1', 'Kepler-22')")],
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Facts about a known exoplanet, or all planets of a host star, from the NASA Exoplanet Archive.
+
+    Use for 'tell me about TRAPPIST-1 e', 'how big is HD 209458 b' or 'what planets orbit
+    Kepler-90'. Gives discovery, orbit, radius, mass, temperature, insolation, the host star and
+    its distance; for transiting planets, the next few transit times with their uncertainty.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    return await exoplanets.lookup(name, loc)
+
+
+@tool(annotations=READ_ONLY)
+async def search_exoplanets(
+    discovery_method: Annotated[str | None, Field(description="e.g. 'Transit', 'Radial Velocity', 'Imaging', 'Microlensing'")] = None,
+    min_radius_earth: Annotated[float | None, Field(gt=0, description="Smallest planet radius, Earth radii")] = None,
+    max_radius_earth: Annotated[float | None, Field(gt=0, description="Largest planet radius, Earth radii")] = None,
+    max_distance_pc: Annotated[float | None, Field(gt=0, description="Only systems within this distance (1 pc = 3.26 light years)")] = None,
+    min_insolation: Annotated[float | None, Field(ge=0, description="Least starlight received, relative to Earth (Earth = 1)")] = None,
+    max_insolation: Annotated[float | None, Field(ge=0, description="Most starlight received, relative to Earth; about 0.35-1.75 is a rough habitable range")] = None,
+    max_host_magnitude: Annotated[float | None, Field(description="Only host stars at least this bright (V)")] = None,
+    transiting_only: Annotated[bool, Field(description="Only planets seen to transit their star")] = False,
+    discovered_since: Annotated[int | None, Field(ge=1989, le=2100, description="Discovered in or after this year")] = None,
+    sort_by: Annotated[Literal[tuple(exoplanets.SORTS)], Field(description="Order of results")] = "distance",  # type: ignore[valid-type]
+    limit: Annotated[int, Field(ge=1, le=100, description="Maximum planets")] = 20,
+) -> dict[str, Any]:
+    """Find exoplanets by size, distance, starlight received, discovery method or year.
+
+    Use for 'nearest Earth-sized planets', 'planets in the habitable zone within 50 light years'
+    or 'exoplanets found by direct imaging'. Returns the total number of matches and the top
+    results with radius, mass, temperature, insolation and distance.
+    """
+    return await exoplanets.search(discovery_method, min_radius_earth, max_radius_earth, max_distance_pc,
+                                   min_insolation, max_insolation, max_host_magnitude, transiting_only,
+                                   discovered_since, sort_by, limit)
+
+
+@tool(annotations=READ_ONLY)
+async def get_transits_tonight(
+    max_host_magnitude: Annotated[float, Field(ge=5, le=13, description="Only host stars at least this bright (V)")] = 12.0,
+    min_depth_percent: Annotated[float, Field(ge=0.05, le=5, description="Shallowest transit worth trying (1% = about 11 mmag); 0.5% suits most amateur setups")] = 0.5,
+    min_altitude: MIN_ALT = 30.0,
+    full_transits_only: Annotated[bool, Field(description="Only transits whose ingress and egress both fall in the dark window")] = True,
+    max_timing_uncertainty_min: Annotated[float, Field(gt=0, le=600, description="Skip planets whose predicted time is less certain than this")] = 30,
+    date: DATE = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+    limit: Annotated[int, Field(ge=1, le=50, description="Maximum transits")] = 20,
+) -> dict[str, Any]:
+    """Exoplanet transits observable from the location tonight, in time order.
+
+    Use for 'which exoplanet transits can I record tonight' or planning transit photometry.
+    Gives ingress, mid-transit and egress in local time (converted from the archive's barycentric
+    ephemeris), depth in percent and millimagnitudes, the host star's brightness, altitudes during
+    the transit, and the timing uncertainty from the ephemeris.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    n = sky.night(loc, sky.observing_date(date, loc))
+    rows = await exoplanets.transiting_planets(max_host_magnitude)
+    found = exoplanets.transits_tonight(rows, loc, n, min_depth_percent, min_altitude, full_transits_only,
+                                        max_timing_uncertainty_min)
+    return {
+        "date": n.date.isoformat(),
+        "location": loc.name,
+        "dark_window": n.to_dict(loc)["dark_window"],
+        "total": len(found),
+        "count": min(limit, len(found)),
+        "transits": found[:limit],
+        "note": "Start imaging 30-60 minutes before ingress and continue as long after egress to measure the baseline. "
+                "Timing uncertainty grows as the ephemeris ages; check ExoClock or the Exoplanet Transit Database "
+                "for refined times.",
+        "source": "NASA Exoplanet Archive ephemerides",
+    }
+
+
+@tool(annotations=READ_ONLY)
+async def get_gravitational_wave_events(
+    event: Annotated[str | None, Field(description="An event: a catalog name ('GW150914', 'GW170817') or a public alert id ('S251117dq')")] = None,
+    source: Annotated[Literal["alerts", "catalog"], Field(description="'alerts': latest significant public alerts (GraceDB); 'catalog': confirmed events with masses and distances (GWOSC)")] = "alerts",
+    sort_by: Annotated[Literal[gravwaves.SORTS], Field(description="Catalog order: newest, farthest, most massive, or loudest")] = "date",  # type: ignore[valid-type]
+    limit: Annotated[int, Field(ge=1, le=50, description="Maximum events")] = 10,
+    include_retracted: Annotated[bool, Field(description="Alerts: also list alerts later retracted")] = False,
+    min_probability: Annotated[float, Field(ge=0, le=1, description="Catalog: lowest probability of being astrophysical")] = 0.5,
+) -> dict[str, Any]:
+    """Gravitational-wave detections: recent public alerts, or confirmed events from the catalog.
+
+    Use for 'any recent gravitational wave detections', 'tell me about GW170817' or 'the most
+    massive black hole merger detected'. Alerts give time, false-alarm rate, detectors and the
+    source classification (binary black hole, neutron stars, noise); catalog events give masses,
+    final mass, distance and signal-to-noise with uncertainties.
+    """
+    if event and event.strip().upper().startswith("S"):
+        return await gravwaves.alert(event)
+    if event or source == "catalog":
+        return await gravwaves.confirmed(event, sort_by, limit, min_probability)
+    return await gravwaves.recent_alerts(limit, include_retracted)
+
+
+# ================================================================ astrophotography
+
+FOCAL = Annotated[float, Field(gt=0, le=20000, description="Focal length in mm (telescope or lens), before any Barlow or reducer")]
+SENSOR = Annotated[str | None, Field(description="Sensor preset: " + ", ".join(imaging.SENSORS))]
+SENSOR_W = Annotated[float | None, Field(gt=0, le=100, description="Sensor width in mm, if not using a preset")]
+SENSOR_H = Annotated[float | None, Field(gt=0, le=100, description="Sensor height in mm, if not using a preset")]
+PIXEL = Annotated[float | None, Field(gt=0, le=30, description="Pixel size in micrometres")]
+MEGAPIXELS = Annotated[float | None, Field(gt=0, le=200, description="Sensor megapixels, to work out pixel size")]
+MULTIPLIER = Annotated[float, Field(gt=0.2, le=6, description="Barlow (e.g. 2) or reducer (e.g. 0.8) factor")]
+
+
+def _camera_or_none(sensor: str | None, width: float | None, height: float | None, pixel: float | None,
+                    megapixels: float | None) -> imaging.Camera | None:
+    if not sensor and not (width and height):
+        return None
+    return imaging.camera(sensor, width, height, pixel, megapixels)
+
+
+async def _target_size(target: str) -> tuple[str, float, float, float | None, float | None, float | None]:
+    """(name, major arcmin, minor arcmin, position angle, RA, Dec) for a target."""
+    t = await planner.resolve_target(target)
+    if t.body is not None:
+        details = sky.body_details(t.name.lower(), datetime.now(UTC), None)
+        size = details["apparent_diameter_arcsec"] / 60
+        return t.name, size, size, None, details["ra_deg"], details["dec_deg"]
+    major = t.info.get("major_axis_arcmin")
+    if not major:
+        raise ValueError(f"No size is catalogued for {t.name}; give width_arcmin and height_arcmin instead.")
+    name = planner.display_names(t.info)[0] if t.source == "OpenNGC" else t.name  # 'M31', not 'NGC 224'
+    return name, major, t.info.get("minor_axis_arcmin") or major, t.info.get("position_angle_deg"), t.ra_deg, t.dec_deg
+
+
+@tool(annotations=READ_ONLY)
+async def calculate_field_of_view(
+    focal_length_mm: FOCAL,
+    aperture_mm: Annotated[float | None, Field(gt=0, le=2000, description="Aperture in mm, for focal ratio, exit pupil and resolution")] = None,
+    sensor: SENSOR = None,
+    sensor_width_mm: SENSOR_W = None,
+    sensor_height_mm: SENSOR_H = None,
+    pixel_um: PIXEL = None,
+    megapixels: MEGAPIXELS = None,
+    multiplier: MULTIPLIER = 1.0,
+    seeing_arcsec: SEEING = 2.0,
+    eyepiece_mm: Annotated[float | None, Field(gt=0, le=100, description="Eyepiece focal length in mm, for the visual view")] = None,
+    eyepiece_afov_deg: Annotated[float | None, Field(gt=20, le=120, description="Eyepiece apparent field in degrees (52 for a Plössl if omitted)")] = None,
+) -> dict[str, Any]:
+    """Field of view and image scale for a camera on a telescope or lens, and/or an eyepiece's view.
+
+    Use for 'what field does my ASI2600 give on an 80 mm f/6', 'am I oversampled' or 'what
+    magnification and true field does a 25 mm eyepiece give'. Camera: field in arcminutes and
+    degrees, arcseconds per pixel and how that matches the seeing. Eyepiece: magnification, true
+    field and exit pupil.
+    """
+    cam = _camera_or_none(sensor, sensor_width_mm, sensor_height_mm, pixel_um, megapixels)
+    if cam is None and not eyepiece_mm:
+        raise ValueError("Give a camera (sensor preset or sensor size) or an eyepiece focal length.")
+    return imaging.field_of_view(focal_length_mm * multiplier, aperture_mm, cam, seeing_arcsec, eyepiece_mm, eyepiece_afov_deg)
+
+
+@tool(annotations=READ_ONLY)
+async def frame_target(
+    target: Annotated[str, Field(description="Object to frame: 'M31', 'North America Nebula', 'Moon', 'Jupiter'")],
+    focal_length_mm: FOCAL,
+    sensor: SENSOR = None,
+    sensor_width_mm: SENSOR_W = None,
+    sensor_height_mm: SENSOR_H = None,
+    multiplier: MULTIPLIER = 1.0,
+) -> dict[str, Any]:
+    """Whether a target fits a camera's field, how much it fills, and which way to rotate the camera.
+
+    Use for 'will M31 fit with my 400 mm and APS-C camera' or 'what focal length for the Moon'.
+    Uses catalogued sizes and orientations (OpenNGC) or a planet's current apparent size, and
+    suggests a focal length or a mosaic when the fit is poor.
+    """
+    cam = imaging.camera(sensor, sensor_width_mm, sensor_height_mm, None)
+    focal = focal_length_mm * multiplier
+    name, major, minor, angle, _, _ = await _target_size(target)
+    w, h = imaging.angle_arcmin(cam.width_mm, focal), imaging.angle_arcmin(cam.height_mm, focal)
+    return {"sensor": cam.label, "focal_length_mm": round(focal, 1), **imaging.frame(name, major, minor, angle, w, h, focal)}
+
+
+@tool(annotations=READ_ONLY)
+async def plan_mosaic(
+    focal_length_mm: FOCAL,
+    target: Annotated[str | None, Field(description="Object to cover; or give ra_deg, dec_deg, width_arcmin and height_arcmin")] = None,
+    ra_deg: Annotated[float | None, Field(ge=0, lt=360, description="Centre right ascension (J2000 degrees)")] = None,
+    dec_deg: Annotated[float | None, Field(ge=-90, le=90, description="Centre declination (J2000 degrees)")] = None,
+    width_arcmin: Annotated[float | None, Field(gt=0, le=3600, description="Area to cover, along the width axis")] = None,
+    height_arcmin: Annotated[float | None, Field(gt=0, le=3600, description="Area to cover, across the width axis")] = None,
+    angle_deg: Annotated[float | None, Field(ge=0, lt=360, description="Position angle of the mosaic's width axis, east of north; defaults to the target's major axis, else 90 (east-west)")] = None,
+    overlap_percent: Annotated[float, Field(ge=0, le=50, description="Overlap between neighbouring panels")] = 15,
+    sensor: SENSOR = None,
+    sensor_width_mm: SENSOR_W = None,
+    sensor_height_mm: SENSOR_H = None,
+    multiplier: MULTIPLIER = 1.0,
+) -> dict[str, Any]:
+    """A mosaic plan: how many panels, and the RA/Dec centre of each, to cover a large target.
+
+    Use for 'how many panels to cover the Veil Nebula with my 600 mm' or to get panel
+    coordinates for a sequencer. Lays a grid of camera fields with the requested overlap,
+    rotated along the target's long axis.
+    """
+    cam = imaging.camera(sensor, sensor_width_mm, sensor_height_mm, None)
+    focal = focal_length_mm * multiplier
+    name, pa = None, None
+    if target:
+        name, major, minor, pa, ra, dec = await _target_size(target)
+        width_arcmin, height_arcmin = width_arcmin or major * 1.05, height_arcmin or minor * 1.05
+        ra_deg = ra if ra_deg is None else ra_deg
+        dec_deg = dec if dec_deg is None else dec_deg
+    if None in (ra_deg, dec_deg, width_arcmin, height_arcmin):
+        raise ValueError("Give a target, or ra_deg, dec_deg, width_arcmin and height_arcmin.")
+    angle = angle_deg if angle_deg is not None else (pa if pa is not None else 90.0)
+    w, h = imaging.angle_arcmin(cam.width_mm, focal), imaging.angle_arcmin(cam.height_mm, focal)
+    plan = imaging.mosaic(ra_deg, dec_deg, width_arcmin, height_arcmin, angle, max(w, h), min(w, h), overlap_percent / 100)
+    return {"target": name, "sensor": cam.label, "focal_length_mm": round(focal, 1),
+            "panel_field_arcmin": {"width": round(max(w, h), 1), "height": round(min(w, h), 1)},
+            "area_arcmin": {"width": round(width_arcmin, 1), "height": round(height_arcmin, 1)}, **plan}
+
+
+@tool(annotations=READ_ONLY)
+async def calculate_exposure(
+    focal_length_mm: Annotated[float, Field(gt=0, le=2000, description="Lens focal length in mm (actual, not 35 mm equivalent)")],
+    f_number: Annotated[float, Field(gt=0.7, le=32, description="Aperture as an f-number, e.g. 2.8")],
+    sensor: SENSOR = None,
+    sensor_width_mm: SENSOR_W = None,
+    sensor_height_mm: SENSOR_H = None,
+    pixel_um: PIXEL = None,
+    megapixels: MEGAPIXELS = None,
+    crop_factor: Annotated[float | None, Field(gt=0.3, le=10, description="Crop factor for the 500 rule; worked out from the sensor if omitted")] = None,
+    target: Annotated[str | None, Field(description="Aim point, for its declination: 'Milky Way core', 'Polaris', 'M31'")] = None,
+    declination_deg: Annotated[float | None, Field(ge=-90, le=90, description="Declination of the aim point, instead of a target")] = None,
+) -> dict[str, Any]:
+    """Longest untracked exposure before stars trail, by the NPF rule (and the older 500 rule).
+
+    Use for 'how long can I expose the Milky Way at 14 mm f/2.8 on my camera'. Needs the pixel
+    size (directly, from a sensor preset, or from sensor size and megapixels). Aiming away from
+    the celestial equator allows longer exposures; give a target or declination to include that.
+    """
+    cam = _camera_or_none(sensor, sensor_width_mm, sensor_height_mm, pixel_um, megapixels)
+    dec = declination_deg
+    if target and dec is None:
+        t = await planner.resolve_target("Sgr A*" if target.strip().lower() in ("milky way core", "galactic center", "galactic centre") else target)
+        dec = sky.j2000_position(t, datetime.now(UTC))[1]
+    return imaging.exposure(focal_length_mm, f_number, cam, pixel_um, crop_factor, dec)
 
 
 # ================================================================ space weather and spaceflight

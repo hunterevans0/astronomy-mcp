@@ -28,6 +28,9 @@ No API keys are required. Every source is free and public:
 | [Recent Galactic novae](https://asd.gsfc.nasa.gov/Koji.Mukai/novae/novae.html) (K. Mukai, NASA GSFC) | Novae in our Galaxy with discovery dates and peak magnitudes |
 | [ALeRCE](https://alerce.science/) | Machine-classified supernova candidates from ZTF alerts |
 | [DSN Now](https://eyes.nasa.gov/dsn/dsn.html) | Live Deep Space Network antenna activity |
+| [NASA Exoplanet Archive](https://exoplanetarchive.ipac.caltech.edu/) | Exoplanet properties and transit ephemerides (Planetary Systems Composite table) |
+| [GWOSC](https://gwosc.org/) | Confirmed gravitational-wave events with masses and distances |
+| [GraceDB](https://gracedb.ligo.org/) | Public gravitational-wave alerts and their source classifications |
 | [CelesTrak](https://celestrak.org/) | Satellite orbital elements, propagated with [SGP4](https://pypi.org/project/sgp4/) (cached 2 hours, as CelesTrak asks), and the satellite catalog's radar sizes for rough brightness |
 
 ## Tools
@@ -121,6 +124,24 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | `get_light_curve` | Binned AAVSO light curve by band, up to two years |
 | `get_recent_supernovae` | Supernovae bright enough for amateurs, with host, type, magnitudes and tonight's visibility; optional ALeRCE candidates |
 | `get_novae` | Recent Galactic novae with peak and current brightness; optionally novae in M31 and other galaxies |
+
+**Exoplanets and gravitational waves**
+
+| Tool | What it does |
+| --- | --- |
+| `get_exoplanet` | A planet's (or a star's planets') orbit, size, mass, temperature, host star, and next transit times |
+| `search_exoplanets` | Planets by size, distance, starlight received, discovery method or year |
+| `get_transits_tonight` | Transits you can record tonight: ingress, mid, egress, depth, altitudes, timing uncertainty |
+| `get_gravitational_wave_events` | Latest public alerts with classification, or confirmed events with masses and distances |
+
+**Astrophotography**
+
+| Tool | What it does |
+| --- | --- |
+| `calculate_field_of_view` | Camera field, image scale and sampling for your seeing; eyepiece magnification, true field and exit pupil |
+| `frame_target` | Whether a target fits, how much it fills, which way to rotate the camera, and what to change |
+| `plan_mosaic` | Panel grid and the RA/Dec of each panel, rotated along the target's long axis |
+| `calculate_exposure` | Longest untracked exposure before stars trail (NPF rule, adjusted for declination) |
 
 **Catalogs**
 
@@ -221,6 +242,9 @@ Layout of `src/astronomy_mcp/`:
 - `smallbodies.py`: two-body comet orbits, the bright-comet list (COBS brightness, Horizons positions), Horizons ephemerides, close approaches and fireballs.
 - `satellites.py`: CelesTrak elements, SGP4 to topocentric, Earth's shadow, brightness, pass search, satellites overhead and Starlink trains.
 - `lightpollution.py`, `darksites.py`, `horizon.py`: atlas lookup, dark-site search, terrain horizon.
+- `exoplanets.py`: archive queries, BJD-to-UTC conversion and tonight's transits.
+- `gravwaves.py`: GWOSC catalog events and GraceDB alerts, GPS-to-UTC.
+- `imaging.py`: sensor presets, field of view, sampling, framing, mosaics and the NPF rule (offline).
 - `doubles.py`: WDS queries and the rule of thumb for splitting a pair (Dawes limit, seeing, brightness difference).
 - `variables.py`: AAVSO observations, trends, range position, predicted maxima and eclipses, light curves.
 - `transients.py`: the Latest Supernovae and Galactic novae pages, and ALeRCE candidates.
@@ -242,6 +266,8 @@ Service notes:
 - SBDB's elements for a periodic comet can be from an earlier apparition (10P's are from 2015), so two-body positions can be degrees off. The bright-comet list uses them only to pick candidates.
 - JUPOS itself only publishes the Red Spot's longitude as a chart image, so the measurements come from Project Pluto's `grs_lon.txt`. The newer of that table's last point and the built-in value wins.
 - Sources looked at and not used: the American Meteor Society's fireball data (the public viewer's data files are deliberately obfuscated, and the keyed API was down); Mini-MegaTORTORA's satellite magnitudes (its `robots.txt` disallows automated access); TNS, which asks scripted clients to register bot credentials; ASAS-SN Sky Patrol, whose API server did not answer; and the Fink broker, which was unreachable.
+- Exoplanet Archive transit times are BJD_TDB. `get_transits_tonight` removes the light time across Earth's orbit (up to 8.3 min) and TDB-UTC; this agrees with astropy to about 3 s.
+- GraceDB's per-pipeline `p_astro.json` and `em_bright.json` files are a few hundred bytes; the full alert notices embed sky maps (over 1 MB), so they aren't fetched.
 - AAVSO observations come from `vsx.aavso.org` (`view=api.delim`) with `|` as delimiter, since some fields contain commas. Busy stars have tens of thousands of observations a year, so light curves stop at two years.
 - The Latest Supernovae page is about 3.5 MB and asks crawlers to wait 10 s between requests; it is cached for 6 hours.
 - Public Overpass servers are often overloaded. `find_dark_sites` asks several mirrors at once and still returns sites, flagged as unchecked for access, if none answer.
