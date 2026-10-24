@@ -1,6 +1,6 @@
 # Roadmap
 
-What's built (M1 to M5, half of M6) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
+What's built (M1 to M6) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
 
 ## M1: tonight's sky (done)
 
@@ -60,15 +60,18 @@ Gaps found in M1, now closed:
 - ✅ `get_gravitational_wave_events`: recent significant public alerts from GraceDB with the pipeline's classification (BBH/BNS/NSBH/noise), or confirmed GWOSC events with masses, distance and SNR. Says when the detectors have been quiet (no alerts since November 2025 at the time of writing).
   - Still open: sky maps (localisation area, and whether the region is up from the observer).
 
-## M6: astrophotography and charts
+## M6: astrophotography and charts (done)
 
 - ✅ `calculate_field_of_view`, `frame_target`, `plan_mosaic`: field of view, image scale and sampling against seeing, eyepiece views, framing with the target's catalogued size and orientation (OpenNGC position angles), and mosaic panel coordinates. Sensor presets for common DSLR formats and ZWO cameras.
   - Still open: a saved equipment profile (M7) so the telescope and camera needn't be repeated.
 - ✅ `calculate_exposure`: the simplified NPF rule, (35 N + 30 p) / f, with a 1/cos(declination) allowance for the aim point, and the 500 rule for comparison.
   - Still open: the full NPF formula. Its published coefficients couldn't be confirmed, so only the simplified rule is used.
-- `plan_milky_way_shot`: galactic core position and timing.
-- `get_survey_cutout`, `generate_finder_chart`: DSS / Pan-STARRS cutouts (SkyView, hips2fits).
-- `plate_solve_image`: Astrometry.net (free key).
+- ✅ `plan_milky_way_shot`: windows when the galactic centre is above a minimum altitude and the terrain, the Sun is 18° down and the Moon is down or under 10% lit. Gives where to point at the start, best moment and end, how steeply the band is tilted (portrait frame or panorama), and hours a night by month for the season. Out of season, it finds the next good night (offline apart from the terrain profile).
+  - Still open: light pollution toward the core. The atlas gives brightness at the zenith only, and the core is low on the southern horizon where town light domes are worst. The cloud forecast for the window isn't included either; `get_sky_forecast` covers it.
+- ✅ `get_survey_cutout`, `generate_finder_chart`: cutouts from 11 surveys through hips2fits (DSS2, Pan-STARRS, SDSS, Legacy Surveys, 2MASS, WISE, the Mellinger mosaic for wide fields), with SkyView as the fallback for DSS. Downloads are saved and reused. Finder charts mark the target, camera frame (rotated to a position angle) or eyepiece field, Telrad rings and other OpenNGC objects, with compass and scale bar, mirrored or rotated to match a star diagonal or a Newtonian. Planets are placed at a given time.
+  - Still open: star magnitudes on charts, for star-hopping and variable-star comparison. That needs a star catalogue query (Tycho-2 or Gaia through VizieR). Comet and asteroid tracks across a chart are also open; they'd come from Horizons.
+- ✅ `plate_solve_image`: the Astrometry.net API with a free key in `ASTROMETRY_NET_API_KEY`. Uploads are marked private, large 8-bit images are shrunk first, and scale and position hints come from the equipment or a rough target. A solve that runs past `wait_seconds` hands back a submission id to check later. North, east and mirroring are worked out from the WCS file, because the API's own orientation fields follow different conventions for FITS and other uploads.
+  - Still open: checking the orientation against a solve of our own photo. Without a key, the checks used public solves' WCS files and annotations. A local solver (ASTAP) is also open; it would work offline and keep images private.
 
 ## M7: sessions and personalisation
 

@@ -29,13 +29,18 @@ def _key(url: str, params: dict[str, Any] | None) -> tuple[str, tuple[tuple[str,
 
 
 async def _fetch(
-    url: str, params: dict[str, Any] | None, source: str, timeout: float, accept: tuple[int, ...] = (200,)
+    url: str, params: dict[str, Any] | None, source: str, timeout: float, accept: tuple[int, ...] = (200,),
+    *, data: dict[str, str] | None = None, files: dict[str, tuple[str, bytes, str]] | None = None,
 ) -> httpx.Response:
+    """GET, or POST when there is form data or files."""
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=True, headers={"User-Agent": USER_AGENT}
     ) as client:
         try:
-            resp = await client.get(url, params=params)
+            if data is None and files is None:
+                resp = await client.get(url, params=params)
+            else:
+                resp = await client.post(url, params=params, data=data, files=files)
         except httpx.HTTPError as exc:
             raise UpstreamError(f"Could not reach {source}: {exc}") from exc
     if resp.status_code == 429:
@@ -86,9 +91,19 @@ async def get_text(url: str, params: dict[str, Any] | None = None, *, source: st
     return text
 
 
-async def get_bytes(url: str, *, source: str, timeout: float = 60) -> bytes:
-    """GET a raw document (used for one-off bulk downloads, never cached in memory)."""
-    return (await _fetch(url, None, source, timeout)).content
+async def get_bytes(url: str, params: dict[str, Any] | None = None, *, source: str, timeout: float = 60) -> bytes:
+    """GET a raw document (bulk downloads and images, never cached in memory)."""
+    return (await _fetch(url, params, source, timeout)).content
+
+
+async def post_json(url: str, data: dict[str, str], *, source: str, files: dict[str, tuple[str, bytes, str]] | None = None,
+                    timeout: float = 60) -> Any:
+    """POST a form (multipart when there are files) and parse the JSON answer. Never cached."""
+    resp = await _fetch(url, None, source, timeout, data=data, files=files)
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise UpstreamError(f"{source} returned a non-JSON response: {resp.text[:200]}") from exc
 
 
 async def get_json_file(

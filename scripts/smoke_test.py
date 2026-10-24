@@ -72,6 +72,11 @@ CALLS = [
     ("frame_target", {"target": "M31", "focal_length_mm": 400, "sensor": "aps_c"}),
     ("plan_mosaic", {"target": "M31", "focal_length_mm": 800, "sensor": "asi2600"}),
     ("calculate_exposure", {"focal_length_mm": 14, "f_number": 2.8, "sensor": "full_frame", "megapixels": 24, "target": "Milky Way core"}),
+    ("plan_milky_way_shot", {"place": "Moab, Utah", "days": 30}),
+    ("get_survey_cutout", {"target": "M51", "width_px": 400}),
+    ("generate_finder_chart", {"target": "M97", "focal_length_mm": 1000, "sensor": "asi533", "telrad": True, "fov_deg": 6}),
+    # A public solve, so this runs without an API key; uploading needs ASTROMETRY_NET_API_KEY.
+    ("plate_solve_image", {"submission_id": 8000000, "wait_seconds": 0}),
     ("get_space_weather", {"place": "Fairbanks, Alaska"}),
     ("get_upcoming_launches", {"limit": 2}),
 ]

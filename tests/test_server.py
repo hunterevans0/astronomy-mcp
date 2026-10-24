@@ -6,6 +6,9 @@ from mcp import Client
 from astronomy_mcp import conditions, lunar, mcp
 from astronomy_mcp.http import UpstreamError
 
+# Tools that change something: the saved location, or a submission on Astrometry.net.
+NOT_READ_ONLY = {"set_default_location", "plate_solve_image"}
+
 EXPECTED_TOOLS = {
     # catalogs
     "simbad_lookup", "simbad_cone_search", "vsx_lookup", "vsx_cone_search", "variable_stars_near",
@@ -32,7 +35,8 @@ EXPECTED_TOOLS = {
     # exoplanets and gravitational waves
     "get_exoplanet", "search_exoplanets", "get_transits_tonight", "get_gravitational_wave_events",
     # astrophotography
-    "calculate_field_of_view", "frame_target", "plan_mosaic", "calculate_exposure",
+    "calculate_field_of_view", "frame_target", "plan_mosaic", "calculate_exposure", "plan_milky_way_shot",
+    "get_survey_cutout", "generate_finder_chart", "plate_solve_image",
     # space
     "get_space_weather", "get_upcoming_launches", "get_dsn_status",
 }
@@ -44,7 +48,7 @@ async def test_tools_registered_with_schemas():
     assert set(tools) == EXPECTED_TOOLS
     for name, tool in tools.items():
         assert tool.description
-        assert tool.annotations.read_only_hint is (name != "set_default_location")
+        assert tool.annotations.read_only_hint is (name not in NOT_READ_ONLY)
     assert tools["simbad_lookup"].input_schema["required"] == ["identifier"]
     assert tools["get_position"].input_schema["required"] == ["target"]
 

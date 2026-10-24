@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
+import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import Field
 
 from astronomy_mcp import (
-    airquality, almanac, catalog, conditions, darksites, doubles, dsn, exoplanets, gravwaves, horizon, imaging, jupiter,
-    lightpollution, location, lunar, planner, satellites, simbad, sky, smallbodies, space, transients, variables, vsx,
+    airquality, almanac, catalog, conditions, darksites, doubles, dsn, exoplanets, finder, gravwaves, horizon, imaging,
+    jupiter, lightpollution, location, lunar, milkyway, planner, platesolve, satellites, simbad, sky, smallbodies, space,
+    surveys, transients, variables, vsx,
 )
 from astronomy_mcp.http import UpstreamError
 from astronomy_mcp.location import Location
@@ -58,7 +62,9 @@ mcp = MCPServer(
         "get_novae; which spacecraft NASA is talking to -> get_dsn_status; exoplanets -> get_exoplanet, "
         "search_exoplanets, get_transits_tonight; gravitational waves -> get_gravitational_wave_events; "
         "camera or eyepiece field of view -> calculate_field_of_view; will a target fit -> frame_target, "
-        "plan_mosaic; untracked exposure length -> calculate_exposure; "
+        "plan_mosaic; untracked exposure length -> calculate_exposure; Milky Way core photos -> "
+        "plan_milky_way_shot; a survey image of a field -> get_survey_cutout; a chart for finding a target -> "
+        "generate_finder_chart; where a photo points or what is in it -> plate_solve_image; "
         "aurora -> get_space_weather; launches -> get_upcoming_launches.\n\n"
         "Location: tools take latitude/longitude or a place name, and otherwise use the saved "
         "default. When the user says where they observe from, call set_default_location once. If no "
@@ -90,6 +96,7 @@ def tool(**kwargs: Any) -> Callable[[Callable[..., Awaitable[Any]]], Any]:
 
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=True, idempotent_hint=True)
+UPLOADS = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True)
 
 RA = Annotated[float, Field(ge=0, lt=360, description="Right ascension, decimal degrees (ICRS/J2000)")]
 DEC = Annotated[float, Field(ge=-90, le=90, description="Declination, decimal degrees (ICRS/J2000)")]
@@ -1742,6 +1749,289 @@ async def calculate_exposure(
         t = await planner.resolve_target("Sgr A*" if target.strip().lower() in ("milky way core", "galactic center", "galactic centre") else target)
         dec = sky.j2000_position(t, datetime.now(UTC))[1]
     return imaging.exposure(focal_length_mm, f_number, cam, pixel_um, crop_factor, dec)
+
+
+@tool(annotations=READ_ONLY)
+async def plan_milky_way_shot(
+    date: DATE = None,
+    days: Annotated[int, Field(ge=1, le=60, description="Nights to plan, starting with date; more than one ranks them")] = 1,
+    min_altitude: Annotated[float, Field(ge=0, le=60, description="Lowest useful altitude of the core in degrees")] = 10.0,
+    terrain: TERRAIN = True,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """When and where to photograph the Milky Way's core: dark, moonless windows with the galactic centre up.
+
+    Use for 'can I shoot the Milky Way core tonight', 'best nights this month for Milky Way photos'
+    or 'when does Milky Way season start here'. Gives the shooting window, the core's altitude and
+    compass direction at its start, best moment and end, how steeply the band is tilted (portrait
+    frame or panorama), the Moon, and the season month by month. Does not check clouds (use
+    get_sky_forecast); for exposure length use calculate_exposure with target 'Milky Way core'.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    hz, hz_warning = await _horizon_or_none(loc, terrain)
+    out = {"location": loc.name, **milkyway.plan(loc, sky.observing_date(date, loc), days, min_altitude, hz)}
+    if hz_warning:
+        out["warning"] = hz_warning
+    return out
+
+
+# ================================================================ survey images, finder charts, plate solving
+
+SURVEY_CHOICE = Annotated[
+    Literal[("auto", *surveys.SURVEYS)],  # type: ignore[valid-type]
+    Field(description="Image source. 'auto': DSS2 (whole sky) up to 5°, the Mellinger photographic mosaic for wider "
+                      "fields. Pan-STARRS is sharper but only north of -30°; 2MASS and WISE are infrared."),
+]
+FIELD_RA = Annotated[float | None, Field(ge=0, lt=360, description="Centre right ascension (J2000 degrees), instead of a target")]
+FIELD_DEC = Annotated[float | None, Field(ge=-90, le=90, description="Centre declination (J2000 degrees), instead of a target")]
+FIELD_TIME = Annotated[str | None, Field(description="For a planet: ISO 8601 time to place it at (naive = the saved location's local time). Omit for now.")]
+
+
+async def _sky_field(target: str | None, ra_deg: float | None, dec_deg: float | None, when: str | None) -> dict[str, Any]:
+    """Name, position and catalogued shape of what a survey image or chart is centred on."""
+    if not target:
+        if ra_deg is None or dec_deg is None:
+            raise ValueError("Give a target, or ra_deg and dec_deg.")
+        return {"name": f"RA {imaging.hms(ra_deg)} Dec {imaging.dms(dec_deg)}", "ra": ra_deg, "dec": dec_deg}
+    t = await planner.resolve_target(target)
+    if t.body is not None:
+        if t.name in ("Sun", "Moon"):
+            raise ValueError(f"The {t.name} is far brighter than any survey image and moves too fast for one; "
+                             "this works for planets, stars and deep-sky objects.")
+        at = sky.parse_time(when, location.load_default() or location.Location(0.0, 0.0))
+        ra, dec = sky.j2000_position(t, at)
+        return {"name": t.name, "ra": ra, "dec": dec, "time": at,
+                "note": f"The survey image is decades old, so {t.name} isn't in it; the marker shows where it is at "
+                        f"{at.isoformat(timespec='minutes')}."}
+    name = planner.display_names(t.info)[0] if t.source == "OpenNGC" else t.name
+    common = next((n for n in t.info.get("common_names", []) if n != name), None)
+    return {"name": name, "common": common, "ra": t.ra_deg, "dec": t.dec_deg, "catalog_object": t.info if t.source == "OpenNGC" else None,
+            "major_arcmin": t.info.get("major_axis_arcmin"), "angle_deg": t.info.get("position_angle_deg")}
+
+
+def _image_result(payload: dict[str, Any], image: bytes | None) -> CallToolResult:
+    """The JSON for the model plus the picture itself."""
+    payload = {k: v for k, v in payload.items() if v is not None}
+    content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=1))]
+    if image is not None:
+        data, fmt = surveys.preview(image)
+        content.append(ImageContent(type="image", data=base64.b64encode(data).decode(), mime_type=f"image/{fmt}"))
+    return CallToolResult(content=content, structured_content=payload)
+
+
+@tool(annotations=READ_ONLY)
+async def get_survey_cutout(
+    target: Annotated[str | None, Field(description="Object to centre on: 'M51', 'Stephan's Quintet', 'Uranus'; or give ra_deg and dec_deg")] = None,
+    ra_deg: FIELD_RA = None,
+    dec_deg: FIELD_DEC = None,
+    fov_deg: Annotated[float | None, Field(gt=0.005, le=30, description="Width of the field in degrees. Defaults to 1.5x the target's catalogued size, else 0.5")] = None,
+    survey: SURVEY_CHOICE = "auto",
+    width_px: Annotated[int, Field(ge=64, le=3000, description="Image width in pixels")] = 800,
+    height_px: Annotated[int | None, Field(ge=64, le=3000, description="Image height in pixels; defaults to width_px")] = None,
+    image_format: Annotated[Literal["jpg", "png", "fits"], Field(description="'fits' keeps the data and a WCS header; it is saved, not shown")] = "jpg",
+    time: FIELD_TIME = None,
+) -> CallToolResult:
+    """A survey image of any patch of sky, from DSS, Pan-STARRS, SDSS, Legacy Surveys, 2MASS, WISE and others.
+
+    Use for 'show me what M51 looks like', 'get a DSS image of these coordinates' or a reference
+    frame to compare with your own photo (spotting a new star, checking framing). North up, east
+    left. The image is shown and saved under ~/.astronomy-mcp/images.
+    """
+    field = await _sky_field(target, ra_deg, dec_deg, time)
+    if fov_deg is None:
+        fov_deg = min(10.0, max(0.1, field["major_arcmin"] * 1.5 / 60)) if field.get("major_arcmin") else 0.5
+    height = height_px or width_px
+    key = surveys.pick_survey(survey, fov_deg)
+    data, source, path = await surveys.fetch(key, field["ra"], field["dec"], fov_deg, width_px, height, image_format,
+                                             field["name"])
+    payload = {"target": field["name"], "common_name": field.get("common"), "ra_deg": round(field["ra"], 5),
+               "dec_deg": round(field["dec"], 5), "ra": imaging.hms(field["ra"]), "dec": imaging.dms(field["dec"]),
+               **surveys.describe(key, fov_deg, width_px, height), "source": source, "saved_to": str(path),
+               "note": field.get("note")}
+    return _image_result(payload, None if image_format == "fits" else data)
+
+
+def _chart_objects(cat: catalog.Catalog | None, field: dict[str, Any], fov_deg: float) -> list[finder.Marker]:
+    """Other catalogued deep-sky objects in the chart, brightest first (fewer on wide charts)."""
+    if cat is None:
+        return []
+    radius = fov_deg * 0.75
+    found = []
+    for obj in cat.objects:
+        if obj is field.get("catalog_object") or obj["group"] in ("star", "other") or abs(obj["dec_deg"] - field["dec"]) > radius:
+            continue
+        if fov_deg > surveys.WIDE_FIELD_DEG and (obj.get("magnitude") or 99) > 11:
+            continue
+        if sky.separation_deg(field["ra"], field["dec"], obj["ra_deg"], obj["dec_deg"]) <= radius:
+            found.append(obj)
+    found.sort(key=lambda o: o.get("magnitude") or 99)
+    return [finder.Marker(planner.display_names(o)[0], o["ra_deg"], o["dec_deg"], o.get("major_axis_arcmin")) for o in found[:25]]
+
+
+@tool(annotations=READ_ONLY)
+async def generate_finder_chart(
+    target: Annotated[str | None, Field(description="Object to find: 'M97', 'NGC 891', 'Neptune'; or give ra_deg and dec_deg")] = None,
+    ra_deg: FIELD_RA = None,
+    dec_deg: FIELD_DEC = None,
+    fov_deg: Annotated[float | None, Field(ge=0.05, le=30, description="Chart width in degrees. Defaults to twice the camera frame, 2.5x the eyepiece field, 9° with Telrad rings, else from the target's size")] = None,
+    focal_length_mm: Annotated[float | None, Field(gt=0, le=20000, description="Telescope or lens focal length, to draw the camera frame and/or eyepiece field")] = None,
+    sensor: SENSOR = None,
+    sensor_width_mm: SENSOR_W = None,
+    sensor_height_mm: SENSOR_H = None,
+    rotation_deg: Annotated[float | None, Field(ge=0, lt=360, description="Camera angle: position angle of the sensor's long side, east of north. Defaults to the target's long axis, else 90 (east-west)")] = None,
+    eyepiece_mm: Annotated[float | None, Field(gt=0, le=100, description="Eyepiece focal length in mm, to draw its true field")] = None,
+    eyepiece_afov_deg: Annotated[float | None, Field(gt=20, le=120, description="Eyepiece apparent field in degrees (52 if omitted)")] = None,
+    multiplier: MULTIPLIER = 1.0,
+    telrad: Annotated[bool, Field(description="Draw Telrad rings (0.5°, 2° and 4°) around the target")] = False,
+    orientation: Annotated[Literal[tuple(finder.ORIENTATIONS)], Field(description="'north_up' for naked eye, binoculars and correct-image finders; 'mirrored' for a star diagonal; 'rotated' (180°) for a Newtonian or straight-through finder")] = "north_up",  # type: ignore[valid-type]
+    style: Annotated[Literal[finder.STYLES], Field(description="'print': black stars on white; 'photo': the survey image as it is")] = "print",  # type: ignore[valid-type]
+    survey: SURVEY_CHOICE = "auto",
+    label_objects: Annotated[bool, Field(description="Mark and name other NGC/IC/Messier objects in the field")] = True,
+    size_px: Annotated[int, Field(ge=400, le=2000, description="Chart width in pixels")] = 900,
+    time: FIELD_TIME = None,
+) -> CallToolResult:
+    """A finder chart: a survey image with the target marked, your camera frame or eyepiece field, Telrad rings,
+    nearby objects labelled, compass and scale bar, flipped to match what your telescope shows.
+
+    Use for 'make me a finder chart for M97', 'how do I find NGC 891 with my Telrad', 'show my
+    camera's framing on M31' or 'where is Neptune among the stars'. Shown and saved as a PNG under
+    ~/.astronomy-mcp/charts for printing.
+    """
+    field = await _sky_field(target, ra_deg, dec_deg, time)
+    focal = focal_length_mm * multiplier if focal_length_mm else None
+    frame = None
+    if sensor or (sensor_width_mm and sensor_height_mm):
+        if not focal:
+            raise ValueError("Drawing the camera frame needs focal_length_mm.")
+        cam = imaging.camera(sensor, sensor_width_mm, sensor_height_mm, None)
+        w, h = imaging.angle_arcmin(cam.width_mm, focal), imaging.angle_arcmin(cam.height_mm, focal)
+        angle = rotation_deg if rotation_deg is not None else field.get("angle_deg") if field.get("angle_deg") is not None else 90.0
+        frame = finder.Frame(max(w, h), min(w, h), angle,
+                             f"{cam.label}, {focal:.0f} mm: {finder.angle_label(max(w, h))} x {finder.angle_label(min(w, h))}")
+    eyepiece_arcmin = None
+    if eyepiece_mm:
+        if not focal:
+            raise ValueError("Drawing the eyepiece field needs focal_length_mm.")
+        eyepiece_arcmin = (eyepiece_afov_deg or 52.0) / (focal / eyepiece_mm) * 60
+    if fov_deg is None:
+        if frame:
+            fov_deg = frame.width_arcmin / 60 * 2
+        elif eyepiece_arcmin:
+            fov_deg = eyepiece_arcmin / 60 * 2.5
+        elif telrad:
+            fov_deg = 9.0
+        elif field.get("major_arcmin"):
+            fov_deg = field["major_arcmin"] * 4 / 60
+        else:
+            fov_deg = 1.0
+        fov_deg = min(30.0, max(0.1, fov_deg))
+
+    key = surveys.pick_survey(survey, fov_deg, grayscale=style == "print")
+    data, source, _ = await surveys.fetch(key, field["ra"], field["dec"], fov_deg, size_px, size_px, "jpg", field["name"])
+    objects = _chart_objects(await _catalog_or_none(), field, fov_deg) if label_objects else []
+    title = field["name"] + (f" - {field['common']}" if field.get("common") else "")
+    subtitle = f"RA {imaging.hms(field['ra'])}  Dec {imaging.dms(field['dec'])}  ·  field {finder.angle_label(fov_deg * 60)} wide"
+    if field.get("time"):
+        subtitle += f"  ·  position at {field['time'].isoformat(timespec='minutes')}"
+    spec = finder.ChartSpec(
+        field["ra"], field["dec"], fov_deg, title, subtitle, field["name"], source, frame, eyepiece_arcmin,
+        f"{eyepiece_mm:g} mm eyepiece: {finder.angle_label(eyepiece_arcmin)}" if eyepiece_arcmin else None,
+        telrad, objects, orientation, style)
+    chart = finder.render(data, spec, size_px)
+    path = surveys.output_path("charts", f"{field['name']}_finder_{fov_deg:.3g}deg_{orientation}_{style}", "png")
+    chart.save(path)
+    payload = {
+        "target": field["name"], "common_name": field.get("common"),
+        "ra": imaging.hms(field["ra"]), "dec": imaging.dms(field["dec"]),
+        "field_deg": round(fov_deg, 3),
+        "orientation": finder.ORIENTATIONS[orientation],
+        "camera_frame": {"size_arcmin": [round(frame.width_arcmin, 1), round(frame.height_arcmin, 1)],
+                         "long_side_position_angle_deg": round(frame.angle_deg % 180, 1)} if frame else None,
+        "eyepiece_true_field_arcmin": round(eyepiece_arcmin, 1) if eyepiece_arcmin else None,
+        "objects_labelled": [o.name for o in objects] or None,
+        "source": source,
+        "saved_to": str(path),
+        "note": " ".join(filter(None, [field.get("note"), "At the eyepiece the field also turns with the target's "
+                                       "position in the sky; nudge the scope north to see which way north is."])),
+    }
+    with open(path, "rb") as f:
+        return _image_result(payload, f.read())
+
+
+@tool(annotations=UPLOADS)
+async def plate_solve_image(
+    image: Annotated[str | None, Field(description="Local path to a JPEG, PNG, TIFF or FITS file, or an http(s) URL of one")] = None,
+    submission_id: Annotated[int | None, Field(ge=1, description="Check on an earlier submission instead of uploading")] = None,
+    wait_seconds: Annotated[int, Field(ge=0, le=600, description="How long to wait for the solve before handing back the submission id")] = 60,
+    target: Annotated[str | None, Field(description="Roughly where the image points, to speed up the solve: 'M31', 'Vega'")] = None,
+    ra_deg: Annotated[float | None, Field(ge=0, lt=360, description="Approximate centre RA (J2000 degrees), instead of a target")] = None,
+    dec_deg: Annotated[float | None, Field(ge=-90, le=90, description="Approximate centre declination (J2000 degrees)")] = None,
+    search_radius_deg: Annotated[float, Field(gt=0, le=180, description="How far from the target or RA/Dec to search")] = 10.0,
+    arcsec_per_pixel: Annotated[float | None, Field(gt=0.01, le=3600, description="Image scale, if known")] = None,
+    focal_length_mm: Annotated[float | None, Field(gt=0, le=20000, description="Focal length used, including any reducer or Barlow, for a scale hint")] = None,
+    sensor: SENSOR = None,
+    sensor_width_mm: SENSOR_W = None,
+    sensor_height_mm: SENSOR_H = None,
+    pixel_um: PIXEL = None,
+) -> dict[str, Any]:
+    """Plate-solve an astrophoto with Astrometry.net: exact centre, field size, pixel scale, camera angle and named objects.
+
+    Use for 'what is in this photo', 'where was my camera pointed' or 'what are my image scale
+    and camera rotation'. Uploads the image to nova.astrometry.net (marked private) and needs a
+    free API key in the ASTROMETRY_NET_API_KEY environment variable. Solving takes one to several
+    minutes; if it isn't done within wait_seconds, call again with the returned submission_id.
+    Focal length and sensor, or a rough target, speed it up. Export camera raw files to JPEG,
+    TIFF or FITS first.
+    """
+    if (image is None) == (submission_id is None):
+        raise ValueError("Give either an image to solve or the submission_id of an earlier one.")
+    if submission_id is not None:
+        upload, hinted = platesolve.recall(submission_id)
+    else:
+        image = image.strip().strip('"')
+        upload = None if image.lower().startswith(("http://", "https://")) else platesolve.prepare(Path(image).expanduser())
+        cam = _camera_or_none(sensor, sensor_width_mm, sensor_height_mm, pixel_um, None)
+        center = None
+        if target:
+            center = sky.j2000_position(await planner.resolve_target(target), datetime.now(UTC))
+        elif ra_deg is not None and dec_deg is not None:
+            center = (ra_deg, dec_deg)
+        solver_hints = platesolve.hints(upload.shrink if upload else 1.0,
+                                        _scale_range(arcsec_per_pixel, focal_length_mm, cam, pixel_um, upload),
+                                        center, search_radius_deg)
+        hinted = bool(solver_hints)
+        submission_id = await platesolve.submit(upload or image, solver_hints)
+        platesolve.remember(submission_id, upload, hinted)
+    status, job_id = await platesolve.wait(submission_id, wait_seconds)
+    if status == "pending":
+        return platesolve.pending(submission_id, job_id, wait_seconds)
+    if status == "failure":
+        return platesolve.failed(submission_id, job_id, hinted)
+    out = await platesolve.solution(submission_id, job_id, upload)
+    pixel = pixel_um or (imaging.camera(sensor, None, None, None).pixel_um if sensor else None)
+    if pixel:
+        out["implied_focal_length_mm"] = round(imaging.ARCSEC_PER_RADIAN * pixel / 1000 / out["arcsec_per_pixel"])
+        out["note"] += " implied_focal_length_mm assumes the image is at full resolution (not binned or resized)."
+    return out
+
+
+def _scale_range(arcsec_per_pixel: float | None, focal_mm: float | None, cam: imaging.Camera | None,
+                 pixel_um: float | None, upload: platesolve.Upload | None) -> tuple[float, float] | None:
+    """A generous arcsec-per-pixel range for the solver, from whatever is known about the setup."""
+    if arcsec_per_pixel:
+        return arcsec_per_pixel * 0.9, arcsec_per_pixel * 1.1
+    if not focal_mm:
+        return None
+    guesses = []
+    if cam and upload and upload.width and upload.height:  # full frame at any resolution; a crop reads high
+        guesses.append(imaging.angle_arcmin(max(cam.width_mm, cam.height_mm), focal_mm) * 60 / max(upload.width, upload.height))
+    pixel = pixel_um or (cam.pixel_um if cam else None)
+    if pixel:  # native pixels, or binned 2x2
+        native = imaging.ARCSEC_PER_RADIAN * pixel / 1000 / focal_mm
+        guesses += [native, 2 * native]
+    return (min(guesses) * 0.8, max(guesses) * 1.25) if guesses else None
 
 
 # ================================================================ space weather and spaceflight

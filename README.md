@@ -2,7 +2,7 @@
 
 An [MCP](https://modelcontextprotocol.io) server that gives AI assistants a working knowledge of the sky: what an object is, where it is, whether you can see it tonight from where you are, whether the weather and the local light pollution will cooperate, where to drive for a darker sky, and what's happening in space.
 
-No API keys are required. Every source is free and public:
+No API keys are required, except a free Astrometry.net key for plate solving. Every source is free and public:
 
 | Source | Used for |
 | --- | --- |
@@ -31,6 +31,9 @@ No API keys are required. Every source is free and public:
 | [NASA Exoplanet Archive](https://exoplanetarchive.ipac.caltech.edu/) | Exoplanet properties and transit ephemerides (Planetary Systems Composite table) |
 | [GWOSC](https://gwosc.org/) | Confirmed gravitational-wave events with masses and distances |
 | [GraceDB](https://gracedb.ligo.org/) | Public gravitational-wave alerts and their source classifications |
+| [CDS hips2fits](https://alasky.cds.unistra.fr/hips-image-services/hips2fits) | Survey cutouts (DSS2, Pan-STARRS, SDSS, Legacy Surveys, 2MASS, WISE, Mellinger) for images and finder charts |
+| [NASA SkyView](https://skyview.gsfc.nasa.gov/) | Fallback for DSS cutouts when hips2fits is down |
+| [Astrometry.net](https://nova.astrometry.net/) (free API key) | Plate solving: where a photo points, its scale, rotation and the objects in it |
 | [CelesTrak](https://celestrak.org/) | Satellite orbital elements, propagated with [SGP4](https://pypi.org/project/sgp4/) (cached 2 hours, as CelesTrak asks), and the satellite catalog's radar sizes for rough brightness |
 
 ## Tools
@@ -142,6 +145,10 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | `frame_target` | Whether a target fits, how much it fills, which way to rotate the camera, and what to change |
 | `plan_mosaic` | Panel grid and the RA/Dec of each panel, rotated along the target's long axis |
 | `calculate_exposure` | Longest untracked exposure before stars trail (NPF rule, adjusted for declination) |
+| `plan_milky_way_shot` | Dark, moonless windows with the galactic core up, where it is, how the band is tilted, and the season by month |
+| `get_survey_cutout` | A survey image of any field: DSS2, Pan-STARRS, SDSS, Legacy Surveys, 2MASS, WISE or a wide-field mosaic |
+| `generate_finder_chart` | Printable chart with the target, camera frame or eyepiece field, Telrad rings, labelled objects, flipped to match your scope |
+| `plate_solve_image` | Astrometry.net solve of your photo: centre, field, scale, camera angle, objects in it (needs a free key) |
 
 **Catalogs**
 
@@ -214,6 +221,18 @@ The first deep-sky question downloads the OpenNGC catalog (about 4 MB), and the 
 
 **Other MCP hosts:** use the same command and arguments as for Claude Desktop.
 
+**Plate solving** needs a free Astrometry.net API key. Sign in at [nova.astrometry.net](https://nova.astrometry.net), copy the key from your profile, and set it in the server's environment, e.g. in `claude_desktop_config.json` (or a local copy of `.mcp.json`; don't commit the key):
+
+```json
+"astronomy": {
+  "command": "...",
+  "args": ["-m", "astronomy_mcp"],
+  "env": {"ASTROMETRY_NET_API_KEY": "your-key"}
+}
+```
+
+Images are uploaded to nova.astrometry.net marked private (not publicly visible, no commercial use). Solving takes one to several minutes; if it isn't done within `wait_seconds`, the tool returns a `submission_id` to check later. Survey images and finder charts are saved under `~/.astronomy-mcp/images` and `~/.astronomy-mcp/charts`.
+
 **Interactive inspector** (browser UI to call tools by hand; needs Node):
 
 ```sh
@@ -245,6 +264,9 @@ Layout of `src/astronomy_mcp/`:
 - `exoplanets.py`: archive queries, BJD-to-UTC conversion and tonight's transits.
 - `gravwaves.py`: GWOSC catalog events and GraceDB alerts, GPS-to-UTC.
 - `imaging.py`: sensor presets, field of view, sampling, framing, mosaics and the NPF rule (offline).
+- `milkyway.py`: galactic-centre windows (darkness, Moon, terrain), the band's tilt and the season by month (offline).
+- `surveys.py`, `finder.py`: hips2fits cutouts (SkyView fallback, saved copies reused), and finder charts drawn on them with Pillow.
+- `platesolve.py`: the Astrometry.net API (login, private upload, polling) and orientation from the solution's WCS.
 - `doubles.py`: WDS queries and the rule of thumb for splitting a pair (Dawes limit, seeing, brightness difference).
 - `variables.py`: AAVSO observations, trends, range position, predicted maxima and eclipses, light curves.
 - `transients.py`: the Latest Supernovae and Galactic novae pages, and ALeRCE candidates.
@@ -270,4 +292,6 @@ Service notes:
 - GraceDB's per-pipeline `p_astro.json` and `em_bright.json` files are a few hundred bytes; the full alert notices embed sky maps (over 1 MB), so they aren't fetched.
 - AAVSO observations come from `vsx.aavso.org` (`view=api.delim`) with `|` as delimiter, since some fields contain commas. Busy stars have tens of thousands of observations a year, so light curves stop at two years.
 - The Latest Supernovae page is about 3.5 MB and asks crawlers to wait 10 s between requests; it is cached for 6 hours.
+- hips2fits returns a uniform white image where a survey has no data (Pan-STARRS south of -30°, SDSS gaps), so cutouts check for that and suggest DSS2. Its `fov` is the image width.
+- Astrometry.net's API `orientation` and `parity` fields don't follow one convention: for a FITS upload they match the WCS, for others they don't. `plate_solve_image` downloads the WCS file and works out north, east and mirroring itself, for the image as displayed with its first row at the top.
 - Public Overpass servers are often overloaded. `find_dark_sites` asks several mirrors at once and still returns sites, flagged as unchecked for access, if none answer.
