@@ -1,5 +1,6 @@
 """Offline tests for response parsing and input validation."""
 
+import httpx
 import pytest
 
 from astronomy_mcp import simbad, vsx
@@ -55,6 +56,59 @@ def test_angular_separation():
 async def test_simbad_cone_rejects_bad_otype():
     with pytest.raises(ValueError):
         await simbad.cone_search(10, 10, 1, object_type="G' OR 1=1 --")
+
+
+TAP_ROWS = {"metadata": [{"name": "main_id"}], "data": [["M  57"]]}
+
+
+def _tap_client(handler):
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_simbad_fails_over_to_mirror_and_remembers_it(monkeypatch):
+    monkeypatch.setattr(simbad, "_preferred", 0)
+    hosts = []
+
+    def handler(request):
+        hosts.append(request.url.host)
+        if request.url.host == "simbad.cds.unistra.fr":  # the outage: an HTML 404 page
+            return httpx.Response(404, html="<!doctype html><title>Page unavailable</title>")
+        return httpx.Response(200, json=TAP_ROWS)
+
+    async with _tap_client(handler) as client:
+        assert await simbad.run_adql("SELECT", client) == [{"main_id": "M 57"}]
+        assert await simbad.run_adql("SELECT", client) == [{"main_id": "M 57"}]
+    assert hosts == ["simbad.cds.unistra.fr", "simbad.cfa.harvard.edu", "simbad.cfa.harvard.edu"]
+
+
+async def test_simbad_reports_every_endpoint_when_all_fail(monkeypatch):
+    monkeypatch.setattr(simbad, "_preferred", 0)
+
+    def handler(request):
+        if request.url.host == "simbad.idia.ac.za":
+            raise httpx.ConnectTimeout("timed out")
+        return httpx.Response(503, html="<html>down</html>")
+
+    async with _tap_client(handler) as client:
+        with pytest.raises(simbad.SimbadError) as err:
+            await simbad.run_adql("SELECT", client)
+    message = str(err.value)
+    assert all(host in message for host in ("simbad.cds.unistra.fr", "simbad.cfa.harvard.edu", "simbad.idia.ac.za"))
+    assert "<html" not in message
+
+
+async def test_simbad_bad_query_is_not_retried_on_mirrors(monkeypatch):
+    monkeypatch.setattr(simbad, "_preferred", 0)
+    hosts = []
+
+    def handler(request):
+        hosts.append(request.url.host)
+        return httpx.Response(400, text="Incorrect ADQL query")
+
+    async with _tap_client(handler) as client:
+        with pytest.raises(simbad.SimbadError, match="rejected the query"):
+            await simbad.run_adql("SELEKT", client)
+    assert hosts == ["simbad.cds.unistra.fr"]
 
 
 async def test_vsx_cone_rejects_bad_radius():

@@ -16,6 +16,19 @@ from astronomy_mcp.http import USER_AGENT
 
 TAP_URL = "https://simbad.cds.unistra.fr/simbad/sim-tap/sync"
 
+# Official mirrors, tried in order when CDS itself is down (as during the November 2026 CDS
+# outage, when every simbad.cds.unistra.fr/simbad/ path returned an HTML 404 page). The CfA
+# mirror lags CDS by a few weeks of ingested data.
+MIRRORS = (
+    "https://simbad.cfa.harvard.edu/simbad/sim-tap/sync",
+    "https://simbad.idia.ac.za/simbad/sim-tap/sync",
+)
+ENDPOINTS = (TAP_URL, *MIRRORS)
+
+# Index into ENDPOINTS of the last one that answered, tried first next time so an outage
+# costs one failed request per process rather than one per query.
+_preferred = 0
+
 # Photometric bands available in SIMBAD's `allfluxes` table.
 BANDS = ("U", "B", "V", "R", "I", "J", "H", "K", "G")
 
@@ -48,24 +61,58 @@ def _rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-async def run_adql(query: str, client: httpx.AsyncClient | None = None) -> list[dict[str, Any]]:
-    """Execute an ADQL query against SIMBAD TAP and return rows as dicts."""
-    data = {"REQUEST": "doQuery", "LANG": "ADQL", "FORMAT": "json", "QUERY": query}
-    owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT})
+class _QueryRejected(SimbadError):
+    """The service answered but refused the query itself; another mirror would refuse it too."""
+
+
+def _snippet(resp: httpx.Response) -> str:
+    """A short, readable error body: the start of a TAP/text error, or just a note for HTML pages."""
+    if "html" in resp.headers.get("content-type", "") or resp.text.lstrip()[:15].lower().startswith(("<!doctype", "<html")):
+        return "(HTML error page)"
+    return " ".join(resp.text.split())[:300]
+
+
+async def _post(client: httpx.AsyncClient, url: str, data: dict[str, str]) -> list[dict[str, Any]]:
     try:
-        resp = await client.post(TAP_URL, data=data)
+        resp = await client.post(url, data=data)
     except httpx.HTTPError as exc:
-        raise SimbadError(f"Could not reach SIMBAD: {exc}") from exc
-    finally:
-        if owns_client:
-            await client.aclose()
+        raise SimbadError(f"could not connect ({type(exc).__name__})") from exc
+    if resp.status_code == 400:
+        raise _QueryRejected(f"SIMBAD rejected the query: {_snippet(resp)}")
     if resp.status_code != 200:
-        raise SimbadError(f"SIMBAD returned HTTP {resp.status_code}: {resp.text[:500]}")
+        raise SimbadError(f"HTTP {resp.status_code} {_snippet(resp)}")
     try:
         return _rows(resp.json())
     except ValueError as exc:
-        raise SimbadError(f"SIMBAD returned a non-JSON response: {resp.text[:500]}") from exc
+        raise SimbadError(f"non-JSON response {_snippet(resp)}") from exc
+
+
+async def run_adql(query: str, client: httpx.AsyncClient | None = None) -> list[dict[str, Any]]:
+    """Execute an ADQL query against SIMBAD TAP and return rows as dicts.
+
+    Tries CDS and then its mirrors, starting with whichever answered last.
+    """
+    global _preferred
+    data = {"REQUEST": "doQuery", "LANG": "ADQL", "FORMAT": "json", "QUERY": query}
+    owns_client = client is None
+    client = client or httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT})
+    order = [ENDPOINTS[(_preferred + i) % len(ENDPOINTS)] for i in range(len(ENDPOINTS))]
+    failures = []
+    try:
+        for url in order:
+            try:
+                rows = await _post(client, url, data)
+            except _QueryRejected:
+                raise
+            except SimbadError as exc:
+                failures.append(f"{httpx.URL(url).host}: {exc}")
+                continue
+            _preferred = ENDPOINTS.index(url)
+            return rows
+    finally:
+        if owns_client:
+            await client.aclose()
+    raise SimbadError("SIMBAD is unavailable (CDS and its mirrors all failed): " + "; ".join(failures))
 
 
 def _shape_object(row: dict[str, Any], max_aliases: int) -> dict[str, Any]:
