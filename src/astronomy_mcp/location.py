@@ -1,8 +1,9 @@
 """Observer locations: geocoding, timezone lookup, and the saved default location.
 
 Geocoding and coordinate-to-timezone lookups use Open-Meteo (no key). The
-default location is stored as JSON in ~/.astronomy-mcp/config.json (override
-the directory with the ASTRONOMY_MCP_HOME environment variable).
+default location (and saved equipment, see equipment.py) is stored as JSON in
+~/.astronomy-mcp/config.json (override the directory with the ASTRONOMY_MCP_HOME
+environment variable).
 """
 
 from __future__ import annotations
@@ -48,23 +49,33 @@ def _config_path() -> Path:
     return data_dir() / "config.json"
 
 
+def read_config() -> dict[str, Any]:
+    """The whole config file (default location, saved equipment), or {} if there is none yet."""
+    try:
+        config = json.loads(_config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def write_config_key(key: str, value: Any) -> None:
+    """Replace one top-level entry of the config file, keeping the others."""
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    config = read_config()
+    config[key] = value
+    path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
 def load_default() -> Location | None:
     try:
-        raw = json.loads(_config_path().read_text(encoding="utf-8"))
-        return Location(**raw["default_location"])
-    except (OSError, ValueError, KeyError, TypeError):
+        return Location(**read_config()["default_location"])
+    except (KeyError, TypeError):
         return None
 
 
 def save_default(loc: Location) -> None:
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        config = {}
-    config["default_location"] = loc.to_dict()
-    path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    write_config_key("default_location", loc.to_dict())
 
 
 def _describe(result: dict[str, Any]) -> str:

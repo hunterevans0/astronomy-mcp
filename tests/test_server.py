@@ -6,15 +6,19 @@ from mcp import Client
 from astronomy_mcp import conditions, lunar, mcp
 from astronomy_mcp.http import UpstreamError
 
-# Tools that change something: the saved location, or a submission on Astrometry.net.
-NOT_READ_ONLY = {"set_default_location", "plate_solve_image"}
+# Tools that change something: saved location, equipment or log, an exported file, or a submission on Astrometry.net.
+NOT_READ_ONLY = {"set_default_location", "plate_solve_image", "save_equipment", "log_observation", "delete_observation",
+                 "plan_observing_session"}
 
 EXPECTED_TOOLS = {
     # catalogs
     "simbad_lookup", "simbad_cone_search", "vsx_lookup", "vsx_cone_search", "variable_stars_near",
     "describe_object", "search_deep_sky", "identify_constellation",
-    # location
-    "geocode_location", "set_default_location", "get_default_location",
+    # location and equipment
+    "geocode_location", "set_default_location", "get_default_location", "save_equipment", "get_equipment",
+    # sessions, log and meteors
+    "plan_observing_session", "log_observation", "delete_observation", "get_observing_history",
+    "get_catalog_progress", "get_meteor_showers",
     # sky math
     "get_position", "get_rise_set_transit", "get_twilight_times", "get_moon_phases", "get_planet_positions",
     "get_eclipses", "find_conjunctions", "find_oppositions", "find_greatest_elongations",

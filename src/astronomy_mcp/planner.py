@@ -204,7 +204,6 @@ def whats_up(
     entries: list[dict[str, Any]] = []
     dark_times = _samples(n.window[0], n.window[1], 15)
     moon_alts = [sky.horizontal(MOON, t, loc)["altitude_deg"] for t in dark_times]
-    moon_mag = ae.Illumination(ae.Body.Moon, sky.to_time(dark_times[len(dark_times) // 2])).mag
     darkest_limit = limiting_magnitude(sqm, equipment, aperture_mm)
 
     # --- planets and the Moon (full-precision positions, twilight allowed)
@@ -265,59 +264,9 @@ def whats_up(
             if 90 - abs(loc.latitude - obj["dec_deg"]) < min_altitude:
                 continue
             candidates.append(obj)
-        tracks = sky.fast_tracks([(o["ra_deg"], o["dec_deg"]) for o in candidates], dark_times, loc)
-        moon_radec = [sky.j2000_position(MOON, t) for t in dark_times]
-        for obj, track in zip(candidates, tracks):
-            high_enough = [i for i, (alt, _) in enumerate(track) if alt >= min_altitude]
-            if not high_enough:
-                continue
-            up = [i for i in high_enough if track[i][0] >= _floor(min_altitude, horizon, track[i][1])]
-            if not up:
-                hidden_terrain += 1
-                continue
-            best_i = max(up, key=lambda i: track[i][0])
-            best_alt, best_az = track[best_i]
-            sep = None
-            if moon_alts[best_i] > 0:
-                sep = sky.separation_deg(obj["ra_deg"], obj["dec_deg"], *moon_radec[best_i])
-            sky_here = sqm_with_moon(sqm, moon_mag, moon_alts[best_i], sep if sep is not None else 90.0)
-            mag = obj.get("magnitude")
-            if mag is None:
-                margin, magnification = 1.0, None
-            else:
-                det = _detect(obj, mag, sky_here, equipment, aperture_mm, best_alt)
-                margin, magnification = det.margin_mag, det.magnification
-            if margin < 0:
-                hidden_faint += 1
-                continue
-            showpiece = "messier" in obj or "common_names" in obj
-            score = 100 * (
-                0.35 * min(margin, 4) / 4
-                + 0.30 * math.sin(math.radians(best_alt))
-                + 0.15 * len(up) / len(track)
-                + 0.20 * showpiece
-            )
-            name, aliases = display_names(obj)
-            entry = {
-                "name": name,
-                "also_known_as": ", ".join(aliases) or None,
-                "type": obj["type"],
-                "constellation": obj.get("constellation"),
-                "magnitude": mag,
-                "size_arcmin": obj.get("major_axis_arcmin"),
-                "difficulty": difficulty(margin),
-                "suggested_magnification": (
-                    f"about {magnification:.0f}x" if magnification and equipment == "telescope" else None
-                ),
-                "best_time": fmt(dark_times[best_i], loc),
-                "altitude_at_best_deg": round(best_alt),
-                "direction_at_best": sky.compass(best_az),
-                "visible_from": fmt(dark_times[up[0]], loc),
-                "visible_until": fmt(dark_times[up[-1]], loc),
-                "score": round(score),
-                "note": f"Moon {sep:.0f}° away" if sep is not None and sep < 25 else None,
-            }
-            entries.append({k: v for k, v in entry.items() if v is not None})
+        ranked, hidden_faint, hidden_terrain = rank_deep_sky(candidates, loc, n, sqm, equipment, aperture_mm,
+                                                             min_altitude, horizon)
+        entries += ranked
 
     entries.sort(key=lambda e: e["score"], reverse=True)
     moon_up = sum(1 for alt in moon_alts if alt > 0)
@@ -339,6 +288,84 @@ def whats_up(
         "too_faint_for_conditions": hidden_faint or None,
         "hidden_by_terrain": hidden_terrain or None,
     }
+
+
+def rank_deep_sky(
+    candidates: list[dict[str, Any]],
+    loc: Location,
+    n: Night,
+    sqm: float,
+    equipment: str,
+    aperture_mm: float | None,
+    min_altitude: float,
+    horizon: Horizon | None = None,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Score catalog objects for one night: (entries, how many too faint, how many behind terrain).
+
+    Fast vectorised altitudes over the dark window, moonlight at each object's best time, then
+    the detection model. Objects that never clear min_altitude are dropped silently.
+    """
+    dark_times = _samples(n.window[0], n.window[1], 15)
+    if n.darkest == "none" or not dark_times or not candidates:
+        return [], 0, 0
+    moon_alts = [sky.horizontal(MOON, t, loc)["altitude_deg"] for t in dark_times]
+    moon_mag = ae.Illumination(ae.Body.Moon, sky.to_time(dark_times[len(dark_times) // 2])).mag
+    tracks = sky.fast_tracks([(o["ra_deg"], o["dec_deg"]) for o in candidates], dark_times, loc)
+    moon_radec = [sky.j2000_position(MOON, t) for t in dark_times]
+    entries: list[dict[str, Any]] = []
+    hidden_faint = hidden_terrain = 0
+    for obj, track in zip(candidates, tracks):
+        high_enough = [i for i, (alt, _) in enumerate(track) if alt >= min_altitude]
+        if not high_enough:
+            continue
+        up = [i for i in high_enough if track[i][0] >= _floor(min_altitude, horizon, track[i][1])]
+        if not up:
+            hidden_terrain += 1
+            continue
+        best_i = max(up, key=lambda i: track[i][0])
+        best_alt, best_az = track[best_i]
+        sep = None
+        if moon_alts[best_i] > 0:
+            sep = sky.separation_deg(obj["ra_deg"], obj["dec_deg"], *moon_radec[best_i])
+        sky_here = sqm_with_moon(sqm, moon_mag, moon_alts[best_i], sep if sep is not None else 90.0)
+        mag = obj.get("magnitude")
+        if mag is None:
+            margin, magnification = 1.0, None
+        else:
+            det = _detect(obj, mag, sky_here, equipment, aperture_mm, best_alt)
+            margin, magnification = det.margin_mag, det.magnification
+        if margin < 0:
+            hidden_faint += 1
+            continue
+        showpiece = "messier" in obj or "common_names" in obj
+        score = 100 * (
+            0.35 * min(margin, 4) / 4
+            + 0.30 * math.sin(math.radians(best_alt))
+            + 0.15 * len(up) / len(track)
+            + 0.20 * showpiece
+        )
+        name, aliases = display_names(obj)
+        entry = {
+            "name": name,
+            "also_known_as": ", ".join(aliases) or None,
+            "type": obj["type"],
+            "constellation": obj.get("constellation"),
+            "magnitude": mag,
+            "size_arcmin": obj.get("major_axis_arcmin"),
+            "difficulty": difficulty(margin),
+            "suggested_magnification": (
+                f"about {magnification:.0f}x" if magnification and equipment == "telescope" else None
+            ),
+            "best_time": fmt(dark_times[best_i], loc),
+            "altitude_at_best_deg": round(best_alt),
+            "direction_at_best": sky.compass(best_az),
+            "visible_from": fmt(dark_times[up[0]], loc),
+            "visible_until": fmt(dark_times[up[-1]], loc),
+            "score": round(score),
+            "note": f"Moon {sep:.0f}° away" if sep is not None and sep < 25 else None,
+        }
+        entries.append({k: v for k, v in entry.items() if v is not None})
+    return entries, hidden_faint, hidden_terrain
 
 
 # ---------------------------------------------------------------- comparing nights

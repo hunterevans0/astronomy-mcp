@@ -77,6 +77,13 @@ CALLS = [
     ("generate_finder_chart", {"target": "M97", "focal_length_mm": 1000, "sensor": "asi533", "telrad": True, "fov_deg": 6}),
     # A public solve, so this runs without an API key; uploading needs ASTROMETRY_NET_API_KEY.
     ("plate_solve_image", {"submission_id": 8000000, "wait_seconds": 0}),
+    # Saved equipment and the log are read here, never written, so a smoke run leaves ~/.astronomy-mcp alone.
+    ("get_equipment", {}),
+    ("get_observing_history", {"limit": 3}),
+    ("get_catalog_progress", {"catalog_name": "messier", "place": "Moab, Utah", "limit": 3}),
+    ("plan_observing_session", {"targets": ["M13", "M57", "Albireo", "Saturn", "M42"], "place": "Moab, Utah"}),
+    ("get_meteor_showers", {"place": "Moab, Utah", "days": 60}),
+    ("get_meteor_showers", {"shower": "Geminids", "place": "Moab, Utah"}),
     ("get_space_weather", {"place": "Fairbanks, Alaska"}),
     ("get_upcoming_launches", {"limit": 2}),
 ]

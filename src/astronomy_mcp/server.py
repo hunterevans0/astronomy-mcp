@@ -6,6 +6,7 @@ import asyncio
 import base64
 import functools
 import json
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,10 +18,11 @@ from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import Field
 
 from astronomy_mcp import (
-    airquality, almanac, catalog, conditions, darksites, doubles, dsn, exoplanets, finder, gravwaves, horizon, imaging,
-    jupiter, lightpollution, location, lunar, milkyway, planner, platesolve, satellites, simbad, sky, smallbodies, space,
-    surveys, transients, variables, vsx,
+    airquality, almanac, catalog, conditions, darksites, doubles, dsn, exoplanets, finder, gravwaves, horizon,
+    imaging, jupiter, lightpollution, location, lunar, meteors, milkyway, obslog, planner, platesolve, satellites,
+    session, simbad, sky, smallbodies, space, surveys, transients, variables, vsx,
 )
+from astronomy_mcp import equipment as gear
 from astronomy_mcp.http import UpstreamError
 from astronomy_mcp.location import Location
 
@@ -65,10 +67,16 @@ mcp = MCPServer(
         "plan_mosaic; untracked exposure length -> calculate_exposure; Milky Way core photos -> "
         "plan_milky_way_shot; a survey image of a field -> get_survey_cutout; a chart for finding a target -> "
         "generate_finder_chart; where a photo points or what is in it -> plate_solve_image; "
-        "aurora -> get_space_weather; launches -> get_upcoming_launches.\n\n"
+        "aurora -> get_space_weather; launches -> get_upcoming_launches; meteor showers -> "
+        "get_meteor_showers; 'plan my night' or an order for a list of targets, or a SkySafari list -> "
+        "plan_observing_session; 'I saw X' -> log_observation; 'what have I seen' -> "
+        "get_observing_history; Messier or Caldwell progress -> get_catalog_progress.\n\n"
         "Location: tools take latitude/longitude or a place name, and otherwise use the saved "
         "default. When the user says where they observe from, call set_default_location once. If no "
         "location is known and the question needs one, ask the user.\n\n"
+        "Equipment: when the user describes their telescope, binoculars, eyepieces or camera, save "
+        "each with save_equipment once; tools then use the saved defaults when a question names no "
+        "equipment, and say which they used.\n\n"
         "If a tool finds no match or a service is unavailable, say so rather than substituting "
         "remembered values. Visibility verdicts, sky brightness and limiting magnitudes are model "
         "estimates; present them that way. Times come back in the observer's local time with a UTC "
@@ -107,7 +115,9 @@ DATE = Annotated[str | None, Field(description="Local date (YYYY-MM-DD) whose ev
 TIME = Annotated[str | None, Field(description="ISO 8601 time; without an offset it is the observer's local time. Omit for now.")]
 TARGET = Annotated[str, Field(description="Planet, 'Moon', catalog name (M42, NGC 7000, Caldwell 14), common name (Ring Nebula) or SIMBAD identifier")]
 EQUIPMENT = Annotated[Literal["naked_eye", "binoculars", "telescope"], Field(description="What the observer is using")]
-APERTURE = Annotated[float | None, Field(gt=0, le=2000, description="Aperture in mm (defaults: binoculars 50, telescope 150)")]
+EQUIPMENT_OPT = Annotated[Literal["naked_eye", "binoculars", "telescope"] | None, Field(description="What the observer is using. Omit to use the saved default telescope or binoculars (else a 150 mm telescope).")]
+APERTURE = Annotated[float | None, Field(gt=0, le=2000, description="Aperture in mm. Omit to use the saved telescope or binoculars (else binoculars 50, telescope 150).")]
+SAVED_SCOPE = Annotated[str | None, Field(description="Name of a saved telescope or binoculars (see get_equipment). Omit to use the default one when no aperture or focal length is given.")]
 BORTLE = Annotated[int | None, Field(ge=1, le=9, description="Bortle class of the sky (1 pristine to 9 inner city). Omit to use the saved value or the light-pollution atlas.")]
 TERRAIN = Annotated[bool, Field(description="Account for hills and mountains on the local horizon (first use per location takes a few seconds)")]
 MIN_ALT = Annotated[float, Field(ge=0, le=80, description="Minimum useful altitude in degrees")]
@@ -151,6 +161,46 @@ async def _catalog_or_none() -> catalog.Catalog | None:
         return await catalog.get_catalog()
     except UpstreamError:
         return None
+
+
+def _instrument(kind: str | None, aperture_mm: float | None, telescope: str | None = None,
+                fallback: str = "telescope") -> tuple[str, float | None, dict[str, Any] | None]:
+    """(equipment class, aperture, saved telescope used) for the visibility model.
+
+    A named saved telescope wins; then an aperture the user gave; then the saved default of the
+    requested kind (or any kind when none was requested); then the model's generic defaults.
+    """
+    if kind == "naked_eye":
+        return kind, None, None
+    if telescope:
+        scope = gear.telescope(telescope)
+        return gear.equipment_kind(scope), aperture_mm or scope["aperture_mm"], scope
+    if aperture_mm is not None:
+        return kind or fallback, aperture_mm, None
+    scope = gear.telescope(kind=kind)
+    if scope is not None:
+        return gear.equipment_kind(scope), scope["aperture_mm"], scope
+    return kind or fallback, None, None
+
+
+def _equipment_note(kind: str, aperture_mm: float | None, scope: dict[str, Any] | None) -> str:
+    if scope is not None:
+        return gear.describe(scope)
+    if kind == "naked_eye":
+        return "naked eye"
+    size = aperture_mm or conditions.DEFAULT_APERTURE_MM[kind]
+    return f"{kind}, {size:g} mm" + ("" if aperture_mm else " (assumed; save_equipment stores your own)")
+
+
+def _optics(focal_length_mm: float | None, telescope: str | None,
+            aperture_mm: float | None = None) -> tuple[float, float | None, str | None]:
+    """(focal length, aperture, saved telescope used) for the imaging tools."""
+    if focal_length_mm and not telescope:
+        return focal_length_mm, aperture_mm, None
+    scope = gear.telescope(telescope, kind=None if telescope else "telescope")
+    if scope is None or not scope.get("focal_length_mm"):
+        raise ValueError("Give focal_length_mm, or save a telescope with save_equipment first.")
+    return focal_length_mm or scope["focal_length_mm"], aperture_mm or scope["aperture_mm"], gear.describe(scope)
 
 
 # ================================================================ location
@@ -208,6 +258,84 @@ async def get_default_location() -> dict[str, Any]:
     if loc is None:
         return {"set": False, "message": "No default location saved. Use set_default_location."}
     return {"set": True, "default_location": loc.to_dict()}
+
+
+# ================================================================ saved equipment
+
+def _equipment_summary() -> dict[str, Any]:
+    saved = gear.load()
+    scopes = []
+    for s in saved["telescopes"]:
+        row = dict(s)
+        if s.get("focal_length_mm"):
+            row["focal_ratio"] = f"f/{s['focal_length_mm'] / s['aperture_mm']:.1f}"
+        scopes.append(row)
+    out: dict[str, Any] = {"telescopes": scopes, "eyepieces": saved["eyepieces"], "cameras": saved["cameras"]}
+    scope = gear.telescope(kind="telescope")
+    if scope and saved["eyepieces"]:
+        out["eyepieces_on_default_telescope"] = {
+            "telescope": scope["name"], "views": gear.eyepiece_views(scope["focal_length_mm"], scope["aperture_mm"])}
+    if not any(saved.values()):
+        out["message"] = "No equipment saved yet. Use save_equipment."
+    return out
+
+
+def _saved_names() -> dict[str, list[str]]:
+    """Names of everything saved, defaults marked."""
+    return {kind: [i["name"] + (" (default)" if i.get("default") else "") for i in items]
+            for kind, items in gear.load().items()}
+
+
+@tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False))
+async def save_equipment(
+    kind: Annotated[Literal["telescope", "binoculars", "eyepiece", "camera"], Field(description="What is being saved")],
+    name: Annotated[str, Field(description="Name to refer to it by: '8-inch Dob', '10x50', '13 mm Ethos', 'ASI2600MC'. Saving an existing name replaces it.")],
+    aperture_mm: Annotated[float | None, Field(gt=0, le=2000, description="Telescope or binocular aperture in mm")] = None,
+    focal_length_mm: Annotated[float | None, Field(gt=0, le=20000, description="Telescope or eyepiece focal length in mm")] = None,
+    focal_ratio: Annotated[float | None, Field(gt=1, le=40, description="Telescope focal ratio (e.g. 6 for f/6), to work out the focal length from the aperture")] = None,
+    magnification: Annotated[float | None, Field(gt=1, le=100, description="Binocular magnification (10 for 10x50)")] = None,
+    afov_deg: Annotated[float | None, Field(gt=20, le=120, description="Eyepiece apparent field of view in degrees")] = None,
+    sensor: Annotated[str | None, Field(description="Camera sensor preset: " + ", ".join(imaging.SENSORS))] = None,
+    sensor_width_mm: Annotated[float | None, Field(gt=0, le=100, description="Camera sensor width in mm, if not a preset")] = None,
+    sensor_height_mm: Annotated[float | None, Field(gt=0, le=100, description="Camera sensor height in mm, if not a preset")] = None,
+    pixel_um: Annotated[float | None, Field(gt=0, le=30, description="Camera pixel size in micrometres")] = None,
+    make_default: Annotated[bool, Field(description="Make this the default telescope or camera (the first one saved is the default)")] = False,
+    remove: Annotated[bool, Field(description="Delete the saved item with this name instead of saving")] = False,
+) -> dict[str, Any]:
+    """Save (or remove) a telescope, binoculars, eyepiece or camera, so later questions needn't repeat it.
+
+    Call this when the user describes their equipment ('I have an 8-inch f/6 Dob and a 25 mm and
+    10 mm eyepiece'), once per item. Planning, visibility, double-star, field-of-view, framing and
+    finder-chart tools then use the default telescope and camera when a question names no
+    equipment, and suggest saved eyepieces. Stored in ~/.astronomy-mcp/config.json.
+    """
+    store_kind = "telescope" if kind == "binoculars" else kind
+    if remove:
+        gone = gear.remove(store_kind, name)
+        return {"removed": gone, "now_saved": _saved_names()}
+    if kind == "telescope" and focal_ratio and aperture_mm and not focal_length_mm:
+        focal_length_mm = aperture_mm * focal_ratio
+    item: dict[str, Any] = {"name": name}
+    if store_kind == "telescope":
+        item |= {"type": kind, "aperture_mm": aperture_mm, "focal_length_mm": focal_length_mm,
+                 "magnification": magnification if kind == "binoculars" else None}
+    elif kind == "eyepiece":
+        item |= {"focal_length_mm": focal_length_mm, "afov_deg": afov_deg}
+    else:
+        item |= {"sensor": sensor, "width_mm": sensor_width_mm, "height_mm": sensor_height_mm, "pixel_um": pixel_um}
+    saved, replaced = gear.save(store_kind, item, make_default)
+    out: dict[str, Any] = {"saved": saved, "replaced_existing": replaced, "now_saved": _saved_names()}
+    if kind == "eyepiece" and (scope := gear.telescope(kind="telescope")):
+        out["on_default_telescope"] = next(v for v in gear.eyepiece_views(scope["focal_length_mm"], scope["aperture_mm"])
+                                           if v["eyepiece"] == saved["name"]) | {"telescope": scope["name"]}
+    return out
+
+
+@tool(annotations=READ_ONLY)
+async def get_equipment() -> dict[str, Any]:
+    """The user's saved telescopes, binoculars, eyepieces and cameras, with the defaults marked
+    and each eyepiece's magnification, true field and exit pupil on the default telescope."""
+    return _equipment_summary()
 
 
 # ================================================================ catalogs
@@ -570,8 +698,9 @@ async def get_planet_positions(
 @tool(annotations=READ_ONLY)
 async def whats_up_tonight(
     date: DATE = None,
-    equipment: EQUIPMENT = "telescope",
+    equipment: EQUIPMENT_OPT = None,
     aperture_mm: APERTURE = None,
+    telescope: SAVED_SCOPE = None,
     bortle: BORTLE = None,
     include: Annotated[Literal["all", "planets", "deep_sky"], Field(description="Which kinds of targets")] = "all",
     object_types: Annotated[
@@ -593,15 +722,17 @@ async def whats_up_tonight(
     and viewing window. Does not check clouds; pair with get_sky_forecast for that.
     """
     loc = await location.resolve(latitude, longitude, place)
+    kind, aperture_mm, scope = _instrument(equipment, aperture_mm, telescope)
     n = sky.night(loc, sky.observing_date(date, loc))
     sqm, sqm_source = await _sky_brightness(loc, bortle)
     hz, hz_warning = await _horizon_or_none(loc, terrain)
     cat = await _catalog_or_none() if include != "planets" else None
-    result = planner.whats_up(loc, n, cat, sqm, equipment, aperture_mm, min_altitude, include,
+    result = planner.whats_up(loc, n, cat, sqm, kind, aperture_mm, min_altitude, include,
                               set(object_types) if object_types else None, max_results, hz)
     result["location"] = loc.name
     if "assumptions" in result:
         result["assumptions"]["sky_brightness_source"] = sqm_source
+        result["assumptions"]["equipment_used"] = _equipment_note(kind, aperture_mm, scope)
     warnings = [w for w in (hz_warning,) if w]
     if include != "planets" and cat is None:
         warnings.append("Deep-sky catalog (OpenNGC) could not be downloaded; only planets are listed.")
@@ -614,8 +745,9 @@ async def whats_up_tonight(
 async def is_visible_tonight(
     target: TARGET,
     date: DATE = None,
-    equipment: EQUIPMENT = "telescope",
+    equipment: EQUIPMENT_OPT = None,
     aperture_mm: APERTURE = None,
+    telescope: SAVED_SCOPE = None,
     bortle: BORTLE = None,
     min_altitude: MIN_ALT = 20.0,
     terrain: TERRAIN = True,
@@ -636,8 +768,13 @@ async def is_visible_tonight(
     n = sky.night(loc, day)
     sqm, sqm_source = await _sky_brightness(loc, bortle)
     hz, hz_warning = await _horizon_or_none(loc, terrain)
-    report = planner.visibility_report(t, loc, n, sqm, equipment, aperture_mm, min_altitude, hz)
+    kind, aperture_mm, scope = _instrument(equipment, aperture_mm, telescope)
+    report = planner.visibility_report(t, loc, n, sqm, kind, aperture_mm, min_altitude, hz)
     report["sky_assumed"]["sky_brightness_source"] = sqm_source
+    report["equipment_used"] = _equipment_note(kind, aperture_mm, scope)
+    if scope and scope.get("focal_length_mm") and (m := re.search(r"(\d+)x", report.get("suggested_magnification", ""))):
+        if eyepiece := gear.nearest_eyepiece(scope["focal_length_mm"], float(m.group(1))):
+            report["suggested_eyepiece"] = eyepiece
     out = {"date": day.isoformat(), "location": loc.name, "resolved_by": t.source,
            "dark_window": n.to_dict(loc)["dark_window"], **report}
     if hz_warning:
@@ -752,6 +889,7 @@ async def get_transparency_drivers(
 async def get_limiting_magnitude(
     equipment: EQUIPMENT = "naked_eye",
     aperture_mm: APERTURE = None,
+    telescope: SAVED_SCOPE = None,
     bortle: BORTLE = None,
     sqm: Annotated[float | None, Field(ge=15, le=22.5, description="Measured sky brightness in mag/arcsec^2 (Sky Quality Meter)")] = None,
     time: TIME = None,
@@ -785,8 +923,9 @@ async def get_limiting_magnitude(
         moon_info = {"time": sky.fmt(when, loc), "moon_altitude_deg": round(h["altitude_deg"], 1),
                      "illuminated_percent": phase["illuminated_percent"],
                      "sky_brightening_mag": round(base_sqm - effective, 2)}
-    result = conditions.limiting_magnitude(effective, equipment, aperture_mm)
-    out = {**result, "dark_sky_brightness": round(base_sqm, 2), "sky_brightness_source": source, "moon": moon_info,
+    kind, aperture_mm, scope = _instrument(None if telescope else equipment, aperture_mm, telescope, fallback=equipment)
+    result = conditions.limiting_magnitude(effective, kind, aperture_mm)
+    out = {**result, "equipment_used": _equipment_note(kind, aperture_mm, scope), "dark_sky_brightness": round(base_sqm, 2), "sky_brightness_source": source, "moon": moon_info,
            "note": "Model estimate; observer experience, eyesight and transparency shift real limits by 0.5-1 mag."}
     return {k: v for k, v in out.items() if v is not None}
 
@@ -1356,8 +1495,9 @@ SEEING = Annotated[float, Field(ge=0.3, le=6, description="Typical seeing (star 
 @tool(annotations=READ_ONLY)
 async def get_double_star(
     name: Annotated[str, Field(description="Star name ('Albireo', 'epsilon Lyrae', 'Mizar'), WDS id ('19307+2758') or discoverer designation ('STF 2382')")],
-    aperture_mm: Annotated[float | None, Field(gt=0, le=2000, description="Telescope aperture in mm, to judge whether each pair can be split")] = None,
+    aperture_mm: Annotated[float | None, Field(gt=0, le=2000, description="Telescope aperture in mm, to judge whether each pair can be split. Omit to use the saved telescope.")] = None,
     seeing_arcsec: SEEING = 2.0,
+    telescope: SAVED_SCOPE = None,
 ) -> dict[str, Any]:
     """Every catalogued pair in a double or multiple star, and whether a telescope can split each.
 
@@ -1366,12 +1506,14 @@ async def get_double_star(
     position angle at the latest measurement, magnitudes and spectral types; with an aperture,
     a split verdict (easy/moderate/challenging) and a magnification to try.
     """
+    _, aperture_mm, _ = _instrument("telescope", None if telescope else aperture_mm, telescope)
     return await doubles.lookup(name, aperture_mm, seeing_arcsec)
 
 
 @tool(annotations=READ_ONLY)
 async def find_splittable_doubles(
-    aperture_mm: Annotated[float, Field(gt=0, le=2000, description="Telescope aperture in mm")] = 100,
+    aperture_mm: Annotated[float | None, Field(gt=0, le=2000, description="Telescope aperture in mm. Omit to use the saved telescope (else 100 mm).")] = None,
+    telescope: SAVED_SCOPE = None,
     seeing_arcsec: SEEING = 2.0,
     max_primary_magnitude: Annotated[float, Field(ge=-2, le=10, description="Only pairs whose brighter star is at least this bright")] = 6.5,
     max_separation_arcsec: Annotated[float, Field(gt=0, le=300, description="Skip pairs wider than this")] = 60,
@@ -1394,6 +1536,8 @@ async def find_splittable_doubles(
     loc = await _location_or_none(latitude, longitude, place)
     if constellation and catalog.constellation_abbrev(constellation) is None:
         raise ValueError(f"'{constellation}' is not an IAU constellation name or abbreviation.")
+    _, aperture_mm, _ = _instrument("telescope", None if telescope else aperture_mm, telescope)
+    aperture_mm = aperture_mm or 100.0
     times = _night_times(loc, date) if visible_tonight else None
     out = await doubles.splittable(aperture_mm, seeing_arcsec, max_primary_magnitude, max_separation_arcsec,
                                    catalog.constellation_abbrev(constellation) if constellation else None,
@@ -1606,8 +1750,8 @@ async def get_gravitational_wave_events(
 
 # ================================================================ astrophotography
 
-FOCAL = Annotated[float, Field(gt=0, le=20000, description="Focal length in mm (telescope or lens), before any Barlow or reducer")]
-SENSOR = Annotated[str | None, Field(description="Sensor preset: " + ", ".join(imaging.SENSORS))]
+FOCAL = Annotated[float | None, Field(gt=0, le=20000, description="Focal length in mm (telescope or lens), before any Barlow or reducer. Omit to use the saved telescope.")]
+SENSOR = Annotated[str | None, Field(description="Sensor preset (" + ", ".join(imaging.SENSORS) + ") or the name of a saved camera. Omit to use the saved default camera.")]
 SENSOR_W = Annotated[float | None, Field(gt=0, le=100, description="Sensor width in mm, if not using a preset")]
 SENSOR_H = Annotated[float | None, Field(gt=0, le=100, description="Sensor height in mm, if not using a preset")]
 PIXEL = Annotated[float | None, Field(gt=0, le=30, description="Pixel size in micrometres")]
@@ -1616,10 +1760,22 @@ MULTIPLIER = Annotated[float, Field(gt=0.2, le=6, description="Barlow (e.g. 2) o
 
 
 def _camera_or_none(sensor: str | None, width: float | None, height: float | None, pixel: float | None,
-                    megapixels: float | None) -> imaging.Camera | None:
+                    megapixels: float | None, use_saved: bool = True) -> imaging.Camera | None:
+    """A preset, a saved camera by name, custom dimensions, or (with use_saved) the default saved camera."""
+    if sensor and sensor.strip().lower().replace(" ", "_").replace("-", "_") not in imaging.SENSORS:
+        if saved := gear.camera(sensor):
+            return saved[0]
     if not sensor and not (width and height):
-        return None
+        saved = gear.camera() if use_saved else None
+        return saved[0] if saved else None
     return imaging.camera(sensor, width, height, pixel, megapixels)
+
+
+def _camera(sensor: str | None, width: float | None, height: float | None) -> imaging.Camera:
+    cam = _camera_or_none(sensor, width, height, None, None)
+    if cam is None:
+        raise ValueError("Give a sensor preset or the sensor's width_mm and height_mm, or save a camera with save_equipment.")
+    return cam
 
 
 async def _target_size(target: str) -> tuple[str, float, float, float | None, float | None, float | None]:
@@ -1638,7 +1794,7 @@ async def _target_size(target: str) -> tuple[str, float, float, float | None, fl
 
 @tool(annotations=READ_ONLY)
 async def calculate_field_of_view(
-    focal_length_mm: FOCAL,
+    focal_length_mm: FOCAL = None,
     aperture_mm: Annotated[float | None, Field(gt=0, le=2000, description="Aperture in mm, for focal ratio, exit pupil and resolution")] = None,
     sensor: SENSOR = None,
     sensor_width_mm: SENSOR_W = None,
@@ -1649,6 +1805,7 @@ async def calculate_field_of_view(
     seeing_arcsec: SEEING = 2.0,
     eyepiece_mm: Annotated[float | None, Field(gt=0, le=100, description="Eyepiece focal length in mm, for the visual view")] = None,
     eyepiece_afov_deg: Annotated[float | None, Field(gt=20, le=120, description="Eyepiece apparent field in degrees (52 for a Plössl if omitted)")] = None,
+    telescope: SAVED_SCOPE = None,
 ) -> dict[str, Any]:
     """Field of view and image scale for a camera on a telescope or lens, and/or an eyepiece's view.
 
@@ -1657,20 +1814,30 @@ async def calculate_field_of_view(
     degrees, arcseconds per pixel and how that matches the seeing. Eyepiece: magnification, true
     field and exit pupil.
     """
-    cam = _camera_or_none(sensor, sensor_width_mm, sensor_height_mm, pixel_um, megapixels)
-    if cam is None and not eyepiece_mm:
-        raise ValueError("Give a camera (sensor preset or sensor size) or an eyepiece focal length.")
-    return imaging.field_of_view(focal_length_mm * multiplier, aperture_mm, cam, seeing_arcsec, eyepiece_mm, eyepiece_afov_deg)
+    focal, aperture, scope_note = _optics(focal_length_mm, telescope, aperture_mm)
+    named = bool(sensor or (sensor_width_mm and sensor_height_mm) or eyepiece_mm)
+    cam = _camera_or_none(sensor, sensor_width_mm, sensor_height_mm, pixel_um, megapixels, use_saved=not named)
+    saved_eyepieces = gear.eyepiece_views(focal * multiplier, aperture) if not named else []
+    if cam is None and not eyepiece_mm and not saved_eyepieces:
+        raise ValueError("Give a camera (sensor preset or sensor size) or an eyepiece focal length, "
+                         "or save them with save_equipment.")
+    out = imaging.field_of_view(focal * multiplier, aperture, cam, seeing_arcsec, eyepiece_mm, eyepiece_afov_deg)
+    if saved_eyepieces:
+        out["saved_eyepieces"] = saved_eyepieces
+    if scope_note:
+        out["telescope_used"] = scope_note
+    return out
 
 
 @tool(annotations=READ_ONLY)
 async def frame_target(
     target: Annotated[str, Field(description="Object to frame: 'M31', 'North America Nebula', 'Moon', 'Jupiter'")],
-    focal_length_mm: FOCAL,
+    focal_length_mm: FOCAL = None,
     sensor: SENSOR = None,
     sensor_width_mm: SENSOR_W = None,
     sensor_height_mm: SENSOR_H = None,
     multiplier: MULTIPLIER = 1.0,
+    telescope: SAVED_SCOPE = None,
 ) -> dict[str, Any]:
     """Whether a target fits a camera's field, how much it fills, and which way to rotate the camera.
 
@@ -1678,8 +1845,8 @@ async def frame_target(
     Uses catalogued sizes and orientations (OpenNGC) or a planet's current apparent size, and
     suggests a focal length or a mosaic when the fit is poor.
     """
-    cam = imaging.camera(sensor, sensor_width_mm, sensor_height_mm, None)
-    focal = focal_length_mm * multiplier
+    cam = _camera(sensor, sensor_width_mm, sensor_height_mm)
+    focal = _optics(focal_length_mm, telescope)[0] * multiplier
     name, major, minor, angle, _, _ = await _target_size(target)
     w, h = imaging.angle_arcmin(cam.width_mm, focal), imaging.angle_arcmin(cam.height_mm, focal)
     return {"sensor": cam.label, "focal_length_mm": round(focal, 1), **imaging.frame(name, major, minor, angle, w, h, focal)}
@@ -1687,7 +1854,7 @@ async def frame_target(
 
 @tool(annotations=READ_ONLY)
 async def plan_mosaic(
-    focal_length_mm: FOCAL,
+    focal_length_mm: FOCAL = None,
     target: Annotated[str | None, Field(description="Object to cover; or give ra_deg, dec_deg, width_arcmin and height_arcmin")] = None,
     ra_deg: Annotated[float | None, Field(ge=0, lt=360, description="Centre right ascension (J2000 degrees)")] = None,
     dec_deg: Annotated[float | None, Field(ge=-90, le=90, description="Centre declination (J2000 degrees)")] = None,
@@ -1699,6 +1866,7 @@ async def plan_mosaic(
     sensor_width_mm: SENSOR_W = None,
     sensor_height_mm: SENSOR_H = None,
     multiplier: MULTIPLIER = 1.0,
+    telescope: SAVED_SCOPE = None,
 ) -> dict[str, Any]:
     """A mosaic plan: how many panels, and the RA/Dec centre of each, to cover a large target.
 
@@ -1706,8 +1874,8 @@ async def plan_mosaic(
     coordinates for a sequencer. Lays a grid of camera fields with the requested overlap,
     rotated along the target's long axis.
     """
-    cam = imaging.camera(sensor, sensor_width_mm, sensor_height_mm, None)
-    focal = focal_length_mm * multiplier
+    cam = _camera(sensor, sensor_width_mm, sensor_height_mm)
+    focal = _optics(focal_length_mm, telescope)[0] * multiplier
     name, pa = None, None
     if target:
         name, major, minor, pa, ra, dec = await _target_size(target)
@@ -1748,7 +1916,8 @@ async def calculate_exposure(
     if target and dec is None:
         t = await planner.resolve_target("Sgr A*" if target.strip().lower() in ("milky way core", "galactic center", "galactic centre") else target)
         dec = sky.j2000_position(t, datetime.now(UTC))[1]
-    return imaging.exposure(focal_length_mm, f_number, cam, pixel_um, crop_factor, dec)
+    out = imaging.exposure(focal_length_mm, f_number, cam, pixel_um, crop_factor, dec)
+    return {"camera": cam.label, **out} if cam else out
 
 
 @tool(annotations=READ_ONLY)
@@ -1876,8 +2045,8 @@ async def generate_finder_chart(
     ra_deg: FIELD_RA = None,
     dec_deg: FIELD_DEC = None,
     fov_deg: Annotated[float | None, Field(ge=0.05, le=30, description="Chart width in degrees. Defaults to twice the camera frame, 2.5x the eyepiece field, 9° with Telrad rings, else from the target's size")] = None,
-    focal_length_mm: Annotated[float | None, Field(gt=0, le=20000, description="Telescope or lens focal length, to draw the camera frame and/or eyepiece field")] = None,
-    sensor: SENSOR = None,
+    focal_length_mm: Annotated[float | None, Field(gt=0, le=20000, description="Telescope or lens focal length, to draw the camera frame and/or eyepiece field. Omit to use the saved telescope.")] = None,
+    sensor: Annotated[str | None, Field(description="Sensor preset (" + ", ".join(imaging.SENSORS) + ") or a saved camera's name, to draw its frame")] = None,
     sensor_width_mm: SENSOR_W = None,
     sensor_height_mm: SENSOR_H = None,
     rotation_deg: Annotated[float | None, Field(ge=0, lt=360, description="Camera angle: position angle of the sensor's long side, east of north. Defaults to the target's long axis, else 90 (east-west)")] = None,
@@ -1891,6 +2060,7 @@ async def generate_finder_chart(
     label_objects: Annotated[bool, Field(description="Mark and name other NGC/IC/Messier objects in the field")] = True,
     size_px: Annotated[int, Field(ge=400, le=2000, description="Chart width in pixels")] = 900,
     time: FIELD_TIME = None,
+    telescope: SAVED_SCOPE = None,
 ) -> CallToolResult:
     """A finder chart: a survey image with the target marked, your camera frame or eyepiece field, Telrad rings,
     nearby objects labelled, compass and scale bar, flipped to match what your telescope shows.
@@ -1900,12 +2070,15 @@ async def generate_finder_chart(
     ~/.astronomy-mcp/charts for printing.
     """
     field = await _sky_field(target, ra_deg, dec_deg, time)
+    draws = bool(sensor or (sensor_width_mm and sensor_height_mm) or eyepiece_mm)
+    if draws and (telescope or not focal_length_mm) and gear.telescope(telescope, kind=None if telescope else "telescope"):
+        focal_length_mm = _optics(focal_length_mm, telescope)[0]
     focal = focal_length_mm * multiplier if focal_length_mm else None
     frame = None
     if sensor or (sensor_width_mm and sensor_height_mm):
         if not focal:
-            raise ValueError("Drawing the camera frame needs focal_length_mm.")
-        cam = imaging.camera(sensor, sensor_width_mm, sensor_height_mm, None)
+            raise ValueError("Drawing the camera frame needs focal_length_mm (or a saved telescope).")
+        cam = _camera(sensor, sensor_width_mm, sensor_height_mm)
         w, h = imaging.angle_arcmin(cam.width_mm, focal), imaging.angle_arcmin(cam.height_mm, focal)
         angle = rotation_deg if rotation_deg is not None else field.get("angle_deg") if field.get("angle_deg") is not None else 90.0
         frame = finder.Frame(max(w, h), min(w, h), angle,
@@ -1913,7 +2086,7 @@ async def generate_finder_chart(
     eyepiece_arcmin = None
     if eyepiece_mm:
         if not focal:
-            raise ValueError("Drawing the eyepiece field needs focal_length_mm.")
+            raise ValueError("Drawing the eyepiece field needs focal_length_mm (or a saved telescope).")
         eyepiece_arcmin = (eyepiece_afov_deg or 52.0) / (focal / eyepiece_mm) * 60
     if fov_deg is None:
         if frame:
@@ -1971,7 +2144,7 @@ async def plate_solve_image(
     search_radius_deg: Annotated[float, Field(gt=0, le=180, description="How far from the target or RA/Dec to search")] = 10.0,
     arcsec_per_pixel: Annotated[float | None, Field(gt=0.01, le=3600, description="Image scale, if known")] = None,
     focal_length_mm: Annotated[float | None, Field(gt=0, le=20000, description="Focal length used, including any reducer or Barlow, for a scale hint")] = None,
-    sensor: SENSOR = None,
+    sensor: Annotated[str | None, Field(description="Sensor preset (" + ", ".join(imaging.SENSORS) + ") or a saved camera's name, for a scale hint")] = None,
     sensor_width_mm: SENSOR_W = None,
     sensor_height_mm: SENSOR_H = None,
     pixel_um: PIXEL = None,
@@ -1992,7 +2165,7 @@ async def plate_solve_image(
     else:
         image = image.strip().strip('"')
         upload = None if image.lower().startswith(("http://", "https://")) else platesolve.prepare(Path(image).expanduser())
-        cam = _camera_or_none(sensor, sensor_width_mm, sensor_height_mm, pixel_um, None)
+        cam = _camera_or_none(sensor, sensor_width_mm, sensor_height_mm, pixel_um, None, use_saved=False)
         center = None
         if target:
             center = sky.j2000_position(await planner.resolve_target(target), datetime.now(UTC))
@@ -2010,7 +2183,8 @@ async def plate_solve_image(
     if status == "failure":
         return platesolve.failed(submission_id, job_id, hinted)
     out = await platesolve.solution(submission_id, job_id, upload)
-    pixel = pixel_um or (imaging.camera(sensor, None, None, None).pixel_um if sensor else None)
+    pixel_cam = _camera_or_none(sensor, None, None, None, None, use_saved=False) if sensor else None
+    pixel = pixel_um or (pixel_cam.pixel_um if pixel_cam else None)
     if pixel:
         out["implied_focal_length_mm"] = round(imaging.ARCSEC_PER_RADIAN * pixel / 1000 / out["arcsec_per_pixel"])
         out["note"] += " implied_focal_length_mm assumes the image is at full resolution (not binned or resized)."
@@ -2032,6 +2206,375 @@ def _scale_range(arcsec_per_pixel: float | None, focal_mm: float | None, cam: im
         native = imaging.ARCSEC_PER_RADIAN * pixel / 1000 / focal_mm
         guesses += [native, 2 * native]
     return (min(guesses) * 0.8, max(guesses) * 1.25) if guesses else None
+
+
+# ================================================================ observing log
+
+CATALOG_NAME = Annotated[Literal["messier", "caldwell"], Field(description="Which catalogue")]
+LOG_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
+
+
+def _night_of(when: datetime, loc: Location) -> str:
+    """The local date whose evening starts the night containing `when`."""
+    local = when.astimezone(loc.tz)
+    return (local.date() - timedelta(days=1) if local.hour < 12 else local.date()).isoformat()
+
+
+def _progress_line(entries: list[dict[str, Any]], numbers: dict[str, int]) -> dict[str, str] | None:
+    out = {}
+    for name in numbers:
+        first, _ = obslog.progress(entries, name)
+        out[name] = f"{len(first)} of {obslog.CATALOGS[name]} seen"
+    return out or None
+
+
+@tool(annotations=LOG_WRITE)
+async def log_observation(
+    target: Annotated[str, Field(description="What was observed: 'M31', 'Saturn', 'Albireo', 'Comet 12P'")],
+    time: Annotated[str | None, Field(description="When it was observed, ISO 8601 (local time without an offset). Omit for now.")] = None,
+    seen: Annotated[bool, Field(description="False for a target searched for but not found")] = True,
+    notes: Annotated[str | None, Field(description="The observer's notes: what it looked like, averted vision, detail seen")] = None,
+    equipment: Annotated[Literal["naked_eye", "binoculars", "telescope"] | None, Field(description="What was used. Omit to use the saved default telescope.")] = None,
+    telescope: Annotated[str | None, Field(description="Saved telescope name (or any description) of the instrument used")] = None,
+    eyepiece: Annotated[str | None, Field(description="Saved eyepiece name or a description, e.g. '13 mm'")] = None,
+    magnification: Annotated[float | None, Field(gt=1, le=2000, description="Magnification used, if known")] = None,
+    seeing: Annotated[int | None, Field(ge=1, le=5, description="Seeing, 1 (poor) to 5 (excellent)")] = None,
+    transparency: Annotated[int | None, Field(ge=1, le=5, description="Transparency, 1 (poor) to 5 (excellent)")] = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Record an observation in the user's observing log (~/.astronomy-mcp/observations.json).
+
+    Call this when the user says they saw (or looked for and missed) something: 'I just saw M13',
+    'log Saturn, seeing was great', 'couldn't find M74 tonight'. Matches the target to its catalogue
+    entry (Messier and Caldwell numbers count towards catalogue progress), and records the time,
+    place, equipment and the object's altitude and the Moon at that moment.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    clock = loc or Location(0.0, 0.0, name="unknown")
+    when = sky.parse_time(time, clock)
+    if when > datetime.now(UTC) + timedelta(hours=1):
+        raise ValueError("That time is in the future; log observations after they happen.")
+    entry: dict[str, Any] = {"target": target.strip(), "time": when.astimezone(clock.tz).isoformat(timespec="minutes"),
+                             "seen": seen}
+    resolved, warning = None, None
+    try:
+        resolved = await planner.resolve_target(target)
+    except (ValueError, UpstreamError, simbad.SimbadError):
+        warning = "Not matched to a catalogue object; logged under the name given."
+    obj = resolved.info if resolved and resolved.source == "OpenNGC" else None
+    if resolved:
+        if obj:
+            name, aliases = planner.display_names(obj)
+            entry |= {"name": name, "also_known_as": aliases or None, "type": obj.get("type")}
+        else:
+            entry |= {"name": resolved.name, "type": resolved.info.get("type") or ("Planet" if resolved.body else None)}
+    entry |= obslog.catalog_numbers(target, obj)
+
+    scope = gear.find("telescope", telescope) if telescope else None
+    scope_name = scope["name"] if scope else telescope
+    if equipment == "naked_eye":
+        scope_name = "naked eye"
+    elif telescope is None:
+        scope = gear.telescope(kind=equipment)
+        scope_name = scope["name"] if scope else equipment
+    eyepiece_item = gear.find("eyepiece", eyepiece) if eyepiece else None
+    if magnification is None and scope and eyepiece_item and scope.get("focal_length_mm"):
+        magnification = round(scope["focal_length_mm"] / eyepiece_item["focal_length_mm"])
+    entry |= {"instrument": scope_name, "eyepiece": eyepiece_item["name"] if eyepiece_item else eyepiece,
+              "magnification": magnification, "seeing": seeing, "transparency": transparency, "notes": notes}
+
+    if loc is not None:
+        entry |= {"location": {"name": loc.name, "latitude": round(loc.latitude, 4), "longitude": round(loc.longitude, 4)},
+                  "night": _night_of(when, loc)}
+        moon_alt = sky.horizontal(planner.MOON, when, loc)["altitude_deg"]
+        entry["moon"] = {"illuminated_percent": sky.moon_phase(when)["illuminated_percent"], "altitude_deg": round(moon_alt)}
+        if resolved and resolved.name != "Sun":
+            entry["altitude_deg"] = round(sky.horizontal(resolved, when, loc)["altitude_deg"], 1)
+    else:
+        warning = " ".join(filter(None, [warning, "No location known, so altitude and Moon were not recorded."]))
+    saved = obslog.add(entry)
+    out = {"logged": saved, "catalog_progress": _progress_line(obslog.load(), obslog.catalog_numbers(target, obj)),
+           "warning": warning}
+    return {k: v for k, v in out.items() if v}
+
+
+@tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False))
+async def delete_observation(
+    observation_id: Annotated[int, Field(ge=1, description="The id of the logged observation, from get_observing_history")],
+) -> dict[str, Any]:
+    """Delete one entry from the observing log, e.g. one logged by mistake or twice."""
+    return {"deleted": obslog.delete(observation_id)}
+
+
+@tool(annotations=READ_ONLY)
+async def get_observing_history(
+    target: Annotated[str | None, Field(description="Only observations of this object: 'M13', 'Saturn', 'Ring Nebula'")] = None,
+    catalog_name: Annotated[Literal["messier", "caldwell"] | None, Field(description="Only objects in this catalogue")] = None,
+    since: Annotated[str | None, Field(description="Earliest date, YYYY-MM-DD")] = None,
+    until: Annotated[str | None, Field(description="Latest date, YYYY-MM-DD")] = None,
+    seen: Annotated[bool | None, Field(description="True for successful observations only, False for targets not found")] = None,
+    limit: Annotated[int, Field(ge=1, le=500, description="Maximum entries")] = 50,
+) -> dict[str, Any]:
+    """The user's observing log, newest first, with a summary: 'what did I see last weekend',
+    'have I ever seen M33', 'when did I first see Saturn's rings'. Each entry has an id for
+    delete_observation."""
+    parse = lambda v: datetime.fromisoformat(v).date() if v else None  # noqa: E731
+    out = obslog.history(obslog.load(), target, catalog_name, parse(since), parse(until), seen, limit)
+    if not out["entries"]:
+        out["message"] = "No matching observations logged." + ("" if obslog.load() else " Use log_observation to start a log.")
+    return out
+
+
+@tool(annotations=READ_ONLY)
+async def get_catalog_progress(
+    catalog_name: CATALOG_NAME = "messier",
+    suggest_tonight: Annotated[bool, Field(description="Also list objects not yet seen that are well placed tonight (needs a location)")] = True,
+    date: DATE = None,
+    min_altitude: MIN_ALT = 20.0,
+    equipment: EQUIPMENT_OPT = None,
+    aperture_mm: APERTURE = None,
+    telescope: SAVED_SCOPE = None,
+    bortle: BORTLE = None,
+    terrain: TERRAIN = True,
+    limit: Annotated[int, Field(ge=1, le=110, description="Maximum suggestions for tonight")] = 10,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """How far through the Messier or Caldwell catalogue the user is, from their observing log:
+    how many seen, which are left, and which of those are well placed tonight.
+
+    Use for 'how many Messiers have I seen', 'which Caldwells am I missing' or 'what new Messier
+    object can I get tonight'.
+    """
+    entries = obslog.load()
+    first, missing = obslog.progress(entries, catalog_name)
+    cat = await _catalog_or_none()
+    members = obslog.members(cat, catalog_name)
+    prefix = "M" if catalog_name == "messier" else "Caldwell"
+
+    def label(n: int) -> dict[str, Any]:
+        obj = members.get(n, {})
+        row = {"number": f"{prefix} {n}", "name": planner.display_names(obj)[0] if obj else None,
+               "common_name": (obj.get("common_names") or [None])[0], "type": obj.get("type"),
+               "constellation": obj.get("constellation"), "magnitude": obj.get("magnitude")}
+        return {k: v for k, v in row.items() if v is not None}
+
+    total = obslog.CATALOGS[catalog_name]
+    out: dict[str, Any] = {
+        "catalog": catalog_name.title(),
+        "seen": len(first),
+        "total": total,
+        "percent": round(100 * len(first) / total, 1),
+        "seen_list": [{"number": f"{prefix} {n}", "first_seen": e["time"]} for n, e in sorted(first.items())],
+        "not_seen": [label(n) for n in missing],
+    }
+    loc = await _location_or_none(latitude, longitude, place) if suggest_tonight else None
+    if suggest_tonight and missing:
+        if loc is None:
+            out["tonight"] = "No location known, so tonight's suggestions are skipped."
+        elif cat is None:
+            out["tonight"] = "The OpenNGC catalogue could not be downloaded, so tonight's suggestions are skipped."
+        else:
+            kind, aperture, scope = _instrument(equipment, aperture_mm, telescope)
+            n = sky.night(loc, sky.observing_date(date, loc))
+            sqm, sqm_source = await _sky_brightness(loc, bortle)
+            hz, hz_warning = await _horizon_or_none(loc, terrain)
+            numbered = [(num, members[num]) for num in missing if num in members]
+            ranked, faint, hidden = planner.rank_deep_sky([o for _, o in numbered], loc, n, sqm, kind, aperture,
+                                                          min_altitude, hz)
+            by_name = {planner.display_names(o)[0]: num for num, o in numbered}
+            for row in ranked:
+                row["number"] = f"{prefix} {by_name[row['name']]}"
+            ranked.sort(key=lambda r: r["score"], reverse=True)
+            out["up_tonight_not_seen"] = ranked[:limit]
+            out["tonight"] = {"date": n.date.isoformat(), "location": loc.name,
+                              "equipment_used": _equipment_note(kind, aperture, scope),
+                              "sky_brightness_source": sqm_source, "too_faint": faint or None,
+                              "behind_terrain": hidden or None, "warning": hz_warning}
+            out["tonight"] = {k: v for k, v in out["tonight"].items() if v is not None}
+    if not entries:
+        out["message"] = "The observing log is empty. log_observation records what the user has seen."
+    return out
+
+
+# ================================================================ observing sessions
+
+def _session_request(target: sky.Target, label: str, minutes: int) -> session.Request:
+    if target.body is not None:
+        return session.Request(target, target.name, minutes, [target.name], "solar_system")
+    if target.source == "OpenNGC":
+        obj = target.info
+        name, _ = planner.display_names(obj)
+        ids = [i for i in [obj["name"]] if i.startswith(("NGC", "IC"))]
+        ids += [obj["messier"]] if obj.get("messier") else []
+        ids += [obj["name"], *obj.get("common_names", [])[:1]] if not ids else []
+        kind = "star" if obj.get("group") == "star" else "deep_sky"
+        return session.Request(target, name, minutes, ids, kind)
+    kind = "star" if target.info.get("spectral_type") or "star" in (target.info.get("type") or "").lower() else "deep_sky"
+    return session.Request(target, label.strip(), minutes, [label.strip(), target.name], kind)
+
+
+async def _skysafari_ids(req: session.Request) -> None:
+    """Swap SIMBAD's own designation ('* bet01 Cyg') for numbers SkySafari knows: HR, HD, HIP, SAO."""
+    if req.target.source != "SIMBAD":
+        return
+    try:
+        obj = await simbad.lookup(req.target.name, max_aliases=500)
+    except ANTICIPATED:
+        return
+    aliases = obj.get("aliases", []) if obj else []
+    numbers = [a for prefix in ("HR ", "HD ", "HIP ", "SAO ") for a in aliases if a.startswith(prefix)][:4]
+    if numbers:
+        req.catalog_ids = [req.label, *numbers]
+
+
+@tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=True))
+async def plan_observing_session(
+    targets: Annotated[list[str], Field(min_length=1, max_length=40, description="Objects to observe: ['M13', 'M57', 'Saturn', 'Albireo']")],
+    date: DATE = None,
+    start_time: Annotated[str | None, Field(description="When the session can start: '21:30' (local, on this night) or ISO 8601. Omit for dusk.")] = None,
+    end_time: Annotated[str | None, Field(description="When it must end: '01:00' (after midnight is fine) or ISO 8601. Omit for dawn.")] = None,
+    minutes_per_target: Annotated[int, Field(ge=1, le=240, description="Time to spend on each target")] = 15,
+    minutes: Annotated[dict[str, int] | None, Field(description="Time for particular targets, overriding minutes_per_target: {'M31': 30}")] = None,
+    gap_minutes: Annotated[int, Field(ge=0, le=60, description="Time between targets for slewing and finding")] = 5,
+    min_altitude: MIN_ALT = 25.0,
+    equipment: EQUIPMENT_OPT = None,
+    aperture_mm: APERTURE = None,
+    telescope: SAVED_SCOPE = None,
+    bortle: BORTLE = None,
+    terrain: TERRAIN = True,
+    export: Annotated[Literal["none", "skysafari", "csv"], Field(description="Also save the plan as a SkySafari observing list (.skylist) or a CSV file")] = "none",
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Put a list of targets in order for one night, with a start time for each.
+
+    Use for 'plan my night: M13, M57, M27 and Saturn', 'in what order should I observe these' or
+    'make a SkySafari list for tonight'. Every scheduled target is high enough (and above the
+    terrain) for its whole slot, deep-sky objects in full darkness and planets from dusk; targets
+    that set first go first. Targets that don't fit get a reason (never high enough, behind
+    terrain, too faint for the equipment and sky, or no free slot). Uses saved equipment when
+    none is given. Does not check clouds; pair with get_sky_forecast.
+    """
+    loc = await location.resolve(latitude, longitude, place)
+    day = sky.observing_date(date, loc)
+    n = sky.night(loc, day)
+    kind, aperture, scope = _instrument(equipment, aperture_mm, telescope)
+    sqm, sqm_source = await _sky_brightness(loc, bortle)
+    hz, hz_warning = await _horizon_or_none(loc, terrain)
+    overrides = {catalog.normalize(k): v for k, v in (minutes or {}).items()}
+
+    names = list(dict.fromkeys(t.strip() for t in targets if t.strip()))
+    resolved = await asyncio.gather(*(planner.resolve_target(t) for t in names), return_exceptions=True)
+    requests, failed = [], []
+    for name, result in zip(names, resolved):
+        if isinstance(result, BaseException):
+            if not isinstance(result, ANTICIPATED):
+                raise result
+            failed.append({"target": name, "reason": f"Could not identify it: {result}"})
+            continue
+        mins = overrides.get(catalog.normalize(name), minutes_per_target)
+        requests.append(_session_request(result, name, max(1, min(mins, 600))))
+
+    plan = session.plan(requests, loc, n, sqm, kind, aperture, min_altitude, hz,
+                        session.clock_time(start_time, n, loc), session.clock_time(end_time, n, loc), gap_minutes)
+    if failed:
+        plan["unscheduled"] = [*plan.get("unscheduled", []), *failed]
+    if scope and scope.get("focal_length_mm"):
+        for row in plan["schedule"]:
+            if m := re.search(r"(\d+)x", row.get("suggested_magnification", "")):
+                if eyepiece := gear.nearest_eyepiece(scope["focal_length_mm"], float(m.group(1))):
+                    row["suggested_eyepiece"] = eyepiece
+    plan |= {"location": loc.name, "equipment_used": _equipment_note(kind, aperture, scope),
+             "sky_brightness_source": sqm_source}
+    if hz_warning:
+        plan["warning"] = hz_warning
+
+    if export != "none":
+        by_label = {r.label: r for r in requests}
+        pairs = [(by_label[row["target"]], row) for row in plan["schedule"]]
+        if not pairs:
+            plan["export"] = {"format": export, "saved_to": None, "note": "Nothing was scheduled, so no file was written."}
+        else:
+            stem = f"session_{day.isoformat()}_{loc.name or 'site'}"
+            if export == "skysafari":
+                await asyncio.gather(*(_skysafari_ids(req) for req, _ in pairs))
+                path = session.save_export(session.skysafari(pairs), stem, "skylist")
+                note = ("Import the .skylist file into SkySafari as an observing list. SkySafari matches objects by "
+                        "catalogue number (NGC/IC first) and leaves out any it doesn't recognise, so check stars and "
+                        "planets made it in. Times are not part of the list; keep this plan for the order.")
+            else:
+                path = session.save_export(session.csv_text(pairs, n.window[0]), stem, "csv")
+                note = "Columns: order, name, J2000 RA/Dec in degrees, start, end, minutes."
+            plan["export"] = {"format": export, "saved_to": str(path), "note": note}
+    return plan
+
+
+# ================================================================ meteor showers
+
+@tool(annotations=READ_ONLY)
+async def get_meteor_showers(
+    shower: Annotated[str | None, Field(description="One shower by name or IMO code ('Perseids', 'GEM'), for its next peak and the nights around it. Omit to list upcoming showers.")] = None,
+    start_date: Annotated[str | None, Field(description="First day to consider (YYYY-MM-DD); omit for today")] = None,
+    days: Annotated[int, Field(ge=1, le=400, description="How many days ahead to list peaks")] = 120,
+    include_minor: Annotated[bool, Field(description="Also list weak (ZHR under 5), variable and daytime showers")] = False,
+    bortle: BORTLE = None,
+    latitude: LAT = None,
+    longitude: LON = None,
+    place: PLACE = None,
+) -> dict[str, Any]:
+    """Upcoming meteor showers from the International Meteor Organization's calendar, with peak
+    dates and rates, and how good each peak night is from the user's site.
+
+    Use for 'when is the next meteor shower', 'is the Perseid peak worth staying up for' or 'how
+    many Geminids will I see from here'. For each peak: ZHR, radiant, speed and, with a location,
+    the peak night rated on radiant height, moonlight and sky darkness, with meteors per hour
+    expected at the best time and its time. Clouds are not included; pair with get_sky_forecast.
+    """
+    loc = await _location_or_none(latitude, longitude, place)
+    if start_date:
+        tz = loc.tz if loc else UTC
+        start = datetime.combine(datetime.fromisoformat(start_date).date(), datetime.min.time(), tzinfo=tz)
+    else:
+        start = datetime.now(UTC)
+    sqm, sqm_source = (await _sky_brightness(loc, bortle)) if loc else (None, None)
+    out: dict[str, Any] = {"location": loc.name if loc else None}
+
+    def rated(s: meteors.Shower, peak: datetime) -> dict[str, Any]:
+        row = meteors.describe(s, peak, loc)
+        if loc is not None:
+            row["peak_night"] = meteors.rate_night(s, peak, loc, meteors.peak_night(loc, peak), sqm)
+        return row
+
+    if shower:
+        s = meteors.find(shower)
+        peak = meteors.peak_time(s, start - timedelta(days=2))
+        out["shower"] = meteors.describe(s, peak, loc)
+        if loc is not None:
+            middle = meteors.peak_night(loc, peak)
+            out["nights"] = [meteors.rate_night(s, peak, loc, sky.night(loc, middle.date + timedelta(days=k)), sqm)
+                             for k in (-1, 0, 1)]
+    else:
+        out["showers"] = [rated(s, peak) for s, peak in meteors.upcoming(start, days, include_minor)]
+        today = start.astimezone(loc.tz if loc else UTC).date()
+        out["active_now"] = [s.name for s in meteors.SHOWERS if meteors.is_active(s, today)
+                             and (include_minor or (s.zhr or 0) >= meteors.MAJOR_MIN_ZHR and not s.daytime)] or None
+        if not out["showers"]:
+            out["message"] = f"No {'' if include_minor else 'major '}shower peaks in the next {days} days."
+    if loc is None:
+        out["note"] = "No location known: peak nights are not rated. Give a place or save a default location."
+    else:
+        out["sky_brightness_source"] = sqm_source
+    out["method"] = ("Expected meteors per hour = ZHR x sin(radiant altitude) / r^(6.5 - limiting magnitude), for one "
+                     "observer under a clear sky with an open view; limiting magnitude comes from the sky brightness "
+                     "plus moonlight. Away from the maximum the ZHR is reduced by the peak's approximate width. "
+                     "Outbursts are not predicted here; check the IMO calendar for them.")
+    out["source"] = f"{meteors.SOURCE}; {meteors.CALENDAR_URL}"
+    return {k: v for k, v in out.items() if v is not None}
 
 
 # ================================================================ space weather and spaceflight

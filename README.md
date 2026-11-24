@@ -1,6 +1,6 @@
 # astronomy-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that gives AI assistants a working knowledge of the sky: what an object is, where it is, whether you can see it tonight from where you are, whether the weather and the local light pollution will cooperate, where to drive for a darker sky, and what's happening in space.
+An [MCP](https://modelcontextprotocol.io) server that gives AI assistants a working knowledge of the sky: what an object is, where it is, whether you can see it tonight from where you are, whether the weather and the local light pollution will cooperate, where to drive for a darker sky, and what's happening in space. It also remembers your telescopes, eyepieces and cameras, plans a night's observing in order, and keeps your observing log.
 
 No API keys are required, except a free Astrometry.net key for plate solving. Every source is free and public:
 
@@ -34,6 +34,7 @@ No API keys are required, except a free Astrometry.net key for plate solving. Ev
 | [CDS hips2fits](https://alasky.cds.unistra.fr/hips-image-services/hips2fits) | Survey cutouts (DSS2, Pan-STARRS, SDSS, Legacy Surveys, 2MASS, WISE, Mellinger) for images and finder charts |
 | [NASA SkyView](https://skyview.gsfc.nasa.gov/) | Fallback for DSS cutouts when hips2fits is down |
 | [Astrometry.net](https://nova.astrometry.net/) (free API key) | Plate solving: where a photo points, its scale, rotation and the objects in it |
+| [International Meteor Organization](https://www.imo.net/resources/calendar/) | Meteor showers: the Working List of Visual Meteor Showers from the 2026 Meteor Shower Calendar (built in) |
 | [CelesTrak](https://celestrak.org/) | Satellite orbital elements, propagated with [SGP4](https://pypi.org/project/sgp4/) (cached 2 hours, as CelesTrak asks), and the satellite catalog's radar sizes for rough brightness |
 
 ## Tools
@@ -48,11 +49,25 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | `get_default_location` | Show the saved location |
 | `geocode_location` | Place name to coordinates, elevation and timezone |
 
+**Your equipment and observing log**
+
+| Tool | What it does |
+| --- | --- |
+| `save_equipment` | Save (or remove) a telescope, binoculars, eyepiece or camera; the first telescope and camera saved are the defaults |
+| `get_equipment` | What's saved, with each eyepiece's magnification, true field and exit pupil on the default telescope |
+| `log_observation` | Record what you saw (or looked for and missed), when, where, with what, and your notes |
+| `get_observing_history` | Your log, newest first, filtered by object, catalogue or dates |
+| `delete_observation` | Remove a log entry |
+| `get_catalog_progress` | How many Messier or Caldwell objects you've seen, which are left, and which of those are well placed tonight |
+
+When a question names no equipment, the planning, visibility, double-star, field-of-view, framing and finder-chart tools use the saved default telescope and camera, say which they used, and suggest the saved eyepiece closest to the best magnification.
+
 **Planning tonight**
 
 | Tool | What it does |
 | --- | --- |
 | `whats_up_tonight` | Ranked targets (planets, Moon, deep sky) with difficulty, for your equipment, sky darkness, moonlight and terrain |
+| `plan_observing_session` | Your list of targets in order, with a start time for each, all high enough and in a dark sky; targets that don't fit get a reason. Exports to SkySafari or CSV |
 | `is_visible_tonight` | Yes/no for one object, with reasons (too low, behind terrain, too faint), best time, direction, suggested magnification |
 | `get_sky_forecast` | Hour-by-hour cloud layers, dew risk, wind, seeing and transparency, plus a 0-100 score |
 | `get_twilight_times` | Sunset, civil/nautical/astronomical twilight, dark window, moon-free dark hours |
@@ -65,6 +80,7 @@ Most tools take `latitude`/`longitude` or a `place` name. With neither, they use
 | --- | --- |
 | `best_night_this_month` | Scores upcoming nights for a target (or for dark-sky observing) on altitude, moonlight and cloud forecast |
 | `find_dark_moon_weekends` | Weekends with the Moon down for most of the dark hours, up to two years out |
+| `get_meteor_showers` | Upcoming shower peaks with ZHR and radiant, and each peak night rated for your site: radiant height, moonlight, sky darkness and expected meteors per hour |
 
 **Sites**
 
@@ -217,7 +233,7 @@ uv sync                 # create .venv and install dependencies
 4. Quit Claude Desktop completely (right-click the tray icon → Quit; closing the window isn't enough) and start it again. Desktop only reads the config and starts servers at launch, so do this after every code change too.
 5. Check **Settings → Developer**: `astronomy` should show as running. If it failed, the log is `mcp-server-astronomy.log` in the `logs` folder next to the config file.
 
-The first deep-sky question downloads the OpenNGC catalog (about 4 MB), and the first lunar-terminator question downloads the USGS lunar gazetteer (about 24 MB, kept as a 200 KB extract). Light-pollution tiles and horizon profiles download as needed. Everything is cached in `~/.astronomy-mcp`.
+The first deep-sky question downloads the OpenNGC catalog (about 4 MB), and the first lunar-terminator question downloads the USGS lunar gazetteer (about 24 MB, kept as a 200 KB extract). Light-pollution tiles and horizon profiles download as needed. Everything is cached in `~/.astronomy-mcp`, which also holds what you save: the default location and equipment (`config.json`), the observing log (`observations.json`) and exported observing lists (`lists/`).
 
 **Other MCP hosts:** use the same command and arguments as for Claude Desktop.
 
@@ -271,11 +287,15 @@ Layout of `src/astronomy_mcp/`:
 - `variables.py`: AAVSO observations, trends, range position, predicted maxima and eclipses, light curves.
 - `transients.py`: the Latest Supernovae and Galactic novae pages, and ALeRCE candidates.
 - `catalog.py`, `simbad.py`, `vsx.py`, `location.py`, `space.py`, `dsn.py`: one module per data source.
+- `equipment.py`: saved telescopes, eyepieces and cameras, and picking the default.
+- `obslog.py`: the observing log, Messier and Caldwell numbers, catalogue progress.
+- `session.py`: ordering a night's targets (earliest-deadline-first on a 5-minute grid) and the SkySafari and CSV exports.
+- `meteors.py`: the IMO shower table, peak times from solar longitude, and hourly rates for a site.
 - `http.py`: shared HTTP client with an in-memory TTL cache.
 
 To add a data source, write a client module and register tools in `server.py` with `@tool()`. [ROADMAP.md](ROADMAP.md) lists candidates.
 
-Set `ASTRONOMY_MCP_HOME` to keep the config and caches (catalog, atlas tiles, horizon profiles) somewhere other than `~/.astronomy-mcp`.
+Set `ASTRONOMY_MCP_HOME` to keep the config, observing log and caches (catalog, atlas tiles, horizon profiles) somewhere other than `~/.astronomy-mcp`. The tests set it to a temporary folder.
 
 The server's `instructions` and each tool's description tell the model when a tool is the right source: questions that depend on date, time or location, or that need sourced catalog numbers. They also say general astronomy questions don't need the tools. Keep that balance when adding tools: say when to use the tool, and avoid wording that pushes every astronomy question through it.
 
@@ -295,3 +315,6 @@ Service notes:
 - hips2fits returns a uniform white image where a survey has no data (Pan-STARRS south of -30°, SDSS gaps), so cutouts check for that and suggest DSS2. Its `fov` is the image width.
 - Astrometry.net's API `orientation` and `parity` fields don't follow one convention: for a FITS upload they match the WCS, for others they don't. `plate_solve_image` downloads the WCS file and works out north, east and mirroring itself, for the image as displayed with its first row at the top.
 - Public Overpass servers are often overloaded. `find_dark_sites` asks several mirrors at once and still returns sites, flagged as unchecked for access, if none answer.
+- The IMO publishes its Meteor Shower Calendar once a year as a PDF, so the Working List (Table 5 of the 2026 edition) is built into `meteors.py`. Peak times come from each shower's solar longitude of maximum (J2000, precessed to the date), so they work for any year; they match the 2026 calendar's stated maxima to within about 15 minutes. Expected rates use HR = ZHR x sin(radiant altitude) / r^(6.5 - LM), with LM from the sky brightness and moonlight. Outburst predictions and radiant drift aren't included. Update the table from each year's calendar.
+- SkySafari's `.skylist` format isn't documented. The export writes `SkySafariObservingListVersion=3.0`, then one `SkyObject=BeginObject` ... `EndObject=SkyObject` block per target with `ObjectID` and `CatalogNumber` lines, NGC/IC numbers first, since SkySafari matches on those and drops objects it can't find. Stars get their HR, HD, HIP and SAO numbers from SIMBAD. Only deep-sky entries were checked against working lists; star and planet entries are untested in the app.
+- OpenNGC files M102 under M101 (NGC 5457), so the log takes a Messier or Caldwell number from what the user typed when they name one directly.

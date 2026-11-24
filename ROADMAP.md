@@ -1,6 +1,6 @@
 # Roadmap
 
-What's built (M1 to M6) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
+What's built (M1 to M6, most of M7, and meteor showers) and the candidates for later milestones, grouped by theme. Sources in parentheses; all are free and keyless unless marked.
 
 ## M1: tonight's sky (done)
 
@@ -10,7 +10,8 @@ Gaps found in M1, now closed:
 
 - ✅ **Light pollution was user-supplied.** Sky brightness now comes from the 2025 Light Pollution Atlas (VIIRS-based) via `get_light_pollution`. A Bortle class or SQM reading from the user still takes priority.
 - ✅ **Visibility heuristics were uncalibrated.** They're replaced by a detection-threshold model (`visibility.py`) and a Krisciunas & Schaefer moonlight profile, tuned against a 53-case benchmark from Bortle's published descriptions and standard observing experience. It passes all 53 cases.
-  - Still open: calibrating against real observing logs. That needs `log_observation` (M7) so outcomes can be compared with predictions.
+  - Still open: calibrating against real observing logs. `log_observation` now records each sighting or miss with the object's altitude, the Moon and the equipment, so outcomes can be compared with predictions once there are enough entries.
+  - Found while testing M7: M42 under a near-full Moon from a Bortle 5 sky comes out "too faint" (-0.8 mag) in a 150 mm telescope, though its bright core is easy in practice. Large nebulae are treated as evenly bright over their full catalogued size; a core treatment like the one for galaxies and globulars would fix it.
 - ✅ **Terrain was ignored.** `whats_up_tonight` and `is_visible_tonight` now apply a cached terrain horizon profile.
 
 ## M2: conditions and site (done)
@@ -73,20 +74,24 @@ Gaps found in M1, now closed:
 - ✅ `plate_solve_image`: the Astrometry.net API with a free key in `ASTROMETRY_NET_API_KEY`. Uploads are marked private, large 8-bit images are shrunk first, and scale and position hints come from the equipment or a rough target. A solve that runs past `wait_seconds` hands back a submission id to check later. North, east and mirroring are worked out from the WCS file, because the API's own orientation fields follow different conventions for FITS and other uploads.
   - Still open: checking the orientation against a solve of our own photo. Without a key, the checks used public solves' WCS files and annotations. A local solver (ASTAP) is also open; it would work offline and keep images private.
 
-## M7: sessions and personalisation
+## M7: sessions and personalisation (mostly done)
 
-- `plan_observing_session`, `optimize_target_order`: an ordered schedule under altitude and time limits.
+- ✅ `save_equipment`, `get_equipment`: telescopes, binoculars, eyepieces and cameras in `config.json`. Planning, visibility, double-star, field-of-view, framing and finder-chart tools fall back to the default telescope and camera and say which they used; visibility and session plans suggest the nearest saved eyepiece. Plate solving takes a saved camera by name but never assumes one, since a photo may come from another setup.
+- ✅ `plan_observing_session` (which also covers `optimize_target_order`): earliest-deadline-first on a 5-minute grid, trying a few lookahead windows and keeping the plan that fits most. Each target is above the minimum altitude and terrain for its whole slot, deep sky in the darkest window, planets from civil dusk. Targets left out get a reason: never high enough, behind terrain, outside the session hours, too faint, too short a window, or crowded out.
+  - Still open: slew distance between targets (a Dob user would rather not cross the sky and back), and splitting time between a target's best altitude and fitting more in.
+- ✅ Export to SkySafari (`.skylist`) and CSV. The `.skylist` format is undocumented; deep-sky entries follow working examples, star and planet entries are untested in the app.
+  - Still open: NINA target sets.
+- ✅ `log_observation`, `get_observing_history`, `delete_observation`, `get_catalog_progress` (Messier and Caldwell, with unseen objects well placed tonight, which covers `suggest_unobserved`).
+  - Still open: more catalogues (Herschel 400, RASC Finest NGC), and importing logs from other software.
 - `plan_messier_marathon`: the ordering problem for the one night a year it works.
-- `log_observation`, `get_observing_history`, `get_catalog_progress`, `suggest_unobserved`.
-- `save_equipment_profile`: telescopes, eyepieces and cameras as reusable context.
-- `export_to_telescope`: SkySafari / NINA target lists.
 
 ## Reference and outreach
 
 - `get_apod`, `get_mission_info`, `get_astronauts_in_space`, `get_space_news` (api.nasa.gov key, Spaceflight News API).
 - `search_literature`, `get_recent_papers` (NASA ADS key, arXiv).
 - `get_constellation_story`: sky cultures from Stellarium data files.
-- `get_meteor_showers`, `get_shower_conditions`: IMO calendar plus radiant altitude and moonlight.
+- ✅ `get_meteor_showers`: the IMO 2026 Working List built in, peak times from solar longitude (within about 15 minutes of the calendar's stated 2026 maxima), each peak night rated on radiant altitude, moonlight and sky darkness with expected meteors per hour. One shower gives the nights before and after its peak too.
+  - Still open: outburst predictions (the calendar's Table 6a), radiant drift on nights away from the peak, and refreshing the table from each year's calendar.
 
 ## MCP beyond tools
 
